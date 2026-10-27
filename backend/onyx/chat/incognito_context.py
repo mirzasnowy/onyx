@@ -4,9 +4,18 @@ import hashlib
 import json
 from collections.abc import Callable, Collection, Generator, Sequence
 from contextlib import contextmanager
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    JsonValue,
+    PlainSerializer,
+    TypeAdapter,
+    ValidationError,
+)
 
 from onyx.agents.models import AgentInfo
 from onyx.cache.factory import get_cache_backend
@@ -18,7 +27,6 @@ from onyx.cache.interface import (
 )
 from onyx.chat.citation_processor import CitationMapping
 from onyx.chat.models import MAX_DISCOVERED_AGENTS, PromptMetadata
-from onyx.chat.prompt_formatting import prompt_metadata
 from onyx.chat.response_models import ResponseRecord, SavedAgentContext
 from onyx.chat.stream_buffer import stream_buffer_key_pattern
 from onyx.configs import app_configs
@@ -46,24 +54,39 @@ _MAX_TEARDOWNS_PER_RETRY = 100
 _MAX_COMMIT_ATTEMPTS = 8
 _KEY_PREFIX = "incognito_ctx:v2"
 _PENDING_TEARDOWNS_KEY = f"{_KEY_PREFIX}:pending_teardowns"
-_MESSAGE_ADAPTER: TypeAdapter[Message] = TypeAdapter(Message)
-_MESSAGE_JSON_ADAPTER = TypeAdapter(dict[str, JsonValue])
+_REPLAY_MESSAGE_ADAPTER = TypeAdapter(Message)
 
 
-def _read_message(item: dict[str, JsonValue]) -> Message:
-    data = dict(item)
+def _read_incognito_message(value: dict[str, JsonValue] | Message) -> Message:
+    if not isinstance(value, dict):
+        return value
+    data = dict(value)
     metadata = PromptMetadata.model_validate(data.pop("metadata", {}))
-    message = _MESSAGE_ADAPTER.validate_python(data)
+    message = _REPLAY_MESSAGE_ADAPTER.validate_python(data)
     message.metadata = metadata
     return message
 
 
-def _write_message(message: Message) -> dict[str, JsonValue]:
-    data: dict[str, JsonValue] = message.model_dump(mode="json", exclude={"details"})
-    data["metadata"] = prompt_metadata(message).model_dump(
-        exclude={"image_files", "image_token_count"}
+def serialize_incognito_message(message: Message) -> dict[str, JsonValue]:
+    """Store replay text and prompt metadata without tool details or file bytes."""
+    metadata = (
+        message.metadata
+        if isinstance(message.metadata, PromptMetadata)
+        else PromptMetadata()
     )
+    data: dict[str, JsonValue] = message.model_dump(mode="json", exclude={"details"})
+    data["metadata"] = metadata.model_dump(exclude={"image_files", "image_token_count"})
     return data
+
+
+IncognitoMessage = Annotated[
+    Message,
+    BeforeValidator(_read_incognito_message),
+    PlainSerializer(serialize_incognito_message),
+]
+
+
+_MESSAGE_ADAPTER = TypeAdapter(IncognitoMessage)
 
 
 class IncognitoContext(BaseModel):
@@ -91,7 +114,7 @@ class IncognitoAgentResponse(BaseModel):
 
 class IncognitoState(BaseModel):
     version: int = Field(default=0, ge=0, le=999_999_999_999_999)
-    messages: list[dict[str, JsonValue]] = Field(default_factory=list)
+    messages: list[IncognitoMessage] = Field(default_factory=list)
     previous_run_id: str | None = None
     responses: dict[str, IncognitoAgentResponse] = Field(default_factory=dict)
 
@@ -115,17 +138,13 @@ def _tombstone_key(chat_session_id: UUID) -> str:
     return f"{_context_key(chat_session_id)}:ended"
 
 
-def _decode_state(raw: bytes | None) -> IncognitoState:
-    if raw is None:
-        return IncognitoState()
+def _decode_state(raw: bytes) -> IncognitoState:
     try:
         if len(raw) > _MAX_CONTEXT_BYTES:
             raise ValueError("Temporary history exceeds its storage limit")
         state = IncognitoState.model_validate_json(raw)
         if any(not key.isdigit() for key in state.responses):
             raise ValueError("Invalid response identity")
-        for message in state.messages:
-            _read_message(message)
         return state
     except (ValidationError, ValueError, TypeError, KeyError):
         logger.warning("Dropping unreadable temporary history")
@@ -133,12 +152,11 @@ def _decode_state(raw: bytes | None) -> IncognitoState:
 
 
 def _read_state(cache: CacheBackend, chat_session_id: UUID) -> IncognitoState | None:
-    if cache.exists(_tombstone_key(chat_session_id)):
-        return None
     raw = cache.get(_context_key(chat_session_id))
-    if raw is None or cache.exists(_tombstone_key(chat_session_id)):
+    if raw is None:
         return None
-    return _decode_state(raw)
+    state = _decode_state(raw)
+    return None if cache.exists(_tombstone_key(chat_session_id)) else state
 
 
 def _context(state: IncognitoState | None) -> IncognitoContext:
@@ -146,7 +164,7 @@ def _context(state: IncognitoState | None) -> IncognitoContext:
         return IncognitoContext(version=0, messages=[])
     return IncognitoContext(
         version=state.version,
-        messages=[_read_message(item) for item in state.messages],
+        messages=state.messages,
         previous_run_id=state.previous_run_id,
     )
 
@@ -164,9 +182,7 @@ def _retained_state(
 ) -> IncognitoState:
     state = IncognitoState(
         version=context.version + 1,
-        messages=[
-            _write_message(item) for item in context.messages[-_MAX_CONTEXT_MESSAGES:]
-        ],
+        messages=context.messages[-_MAX_CONTEXT_MESSAGES:],
         previous_run_id=context.previous_run_id,
         responses=dict(responses),
     )
@@ -186,7 +202,7 @@ def _retained_state(
                 size -= 1
     while size > _MAX_CONTEXT_BYTES and len(state.messages) > required_messages:
         removed = state.messages.pop(0)
-        size -= len(_MESSAGE_JSON_ADAPTER.dump_json(removed))
+        size -= len(_MESSAGE_ADAPTER.dump_json(removed))
         if state.messages:
             size -= 1
     if size > _MAX_CONTEXT_BYTES:
@@ -231,7 +247,8 @@ def _update_incognito_state(
             with _locked_incognito_state(chat_session_id) as (cache, lock):
                 if cache.exists(_tombstone_key(chat_session_id)):
                     return False
-                state = update(_read_state(cache, chat_session_id))
+                raw = cache.get(_context_key(chat_session_id))
+                state = update(_decode_state(raw) if raw is not None else None)
                 if state is None:
                     return False
                 payload = state.model_dump_json().encode()
@@ -557,7 +574,7 @@ def save_incognito_response(
 ) -> None:
     """Save root and child replay in one value; reject conflicting retries."""
     replay = json.dumps(
-        [_write_message(message) for message in messages], sort_keys=True
+        [serialize_incognito_message(message) for message in messages], sort_keys=True
     ).encode()
     digest = hashlib.sha256(replay)
     if response is not None:
