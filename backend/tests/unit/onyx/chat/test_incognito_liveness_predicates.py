@@ -6,13 +6,13 @@ from uuid import uuid4
 import pytest
 
 from onyx.chat.incognito_context import (
-    IncognitoState,
     _context_key,
     _tombstone_key,
     incognito_session_ended,
     incognito_session_torn_down,
     incognito_sessions_ended,
 )
+from onyx.chat.models import IncognitoState
 from tests.unit.fakes import FakeCache
 
 

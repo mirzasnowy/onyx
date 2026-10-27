@@ -1,13 +1,16 @@
 from collections.abc import Iterator
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
+    PlainSerializer,
+    TypeAdapter,
 )
 
 from onyx.agents.models import (
@@ -16,11 +19,12 @@ from onyx.agents.models import (
 )
 from onyx.cache.interface import CacheBackend
 from onyx.chat.chat_processing_checker import ChatTurnAdmission
-from onyx.chat.response_models import ChatResponseSnapshot
+from onyx.chat.response_models import ChatResponseSnapshot, ResponseRecord
 from onyx.configs.constants import MessageType
 from onyx.context.models import UserMemoryContext
-from onyx.context.search.models import SearchDoc
+from onyx.context.search.models import SearchDoc, SearchDocsResponse
 from onyx.db.enums import IncognitoRecordMode
+from onyx.deep_research.models import ResearchConfiguration
 from onyx.file_store.models import (
     ChatLoadedFile,
     ExtractedContextFiles,
@@ -31,6 +35,7 @@ from onyx.llm.interfaces import LLM, LLMUserIdentity
 from onyx.llm.models import (
     Message,
     ReasoningEffort,
+    ToolResultMessage,
 )
 from onyx.onyxbot.slack.models import SlackContext
 from onyx.server.query_and_chat.models import (
@@ -44,11 +49,15 @@ from onyx.server.query_and_chat.streaming_models import (
 )
 from onyx.tools.file_snapshot import SavedChatFile, SavedContextFiles
 from onyx.tools.models import ChatFile, PersonaToolConfiguration, SearchToolUsage
-from onyx.tools.results import GeneratedImage
+from onyx.tools.results import GeneratedImage, ResearchAgentCallResult
 from onyx.tools.tool_implementations.custom.base_tool_types import ToolResultType
 from onyx.tools.tool_implementations.search.models import SearchToolState
 
 MAX_DISCOVERED_AGENTS = 128
+_MESSAGE_ADAPTER = TypeAdapter(Message)
+_INCOGNITO_SOURCE_DETAILS = TypeAdapter(
+    Annotated[SearchDocsResponse | ResearchAgentCallResult, Field(discriminator="type")]
+)
 
 
 class PromptMetadata(CompactionMetadata):
@@ -59,6 +68,75 @@ class PromptMetadata(CompactionMetadata):
     file_id: str | None = None
     is_reminder: bool = False
     omit_tool_result_content: bool = False
+
+
+class IncognitoContext(BaseModel):
+    """A session's history plus the version that makes save a compare-and-set."""
+
+    version: int
+    messages: list[Message]
+    previous_run_id: str | None = None
+
+
+class IncognitoAgentState(BaseModel):
+    parent_agent_id: str | None = None
+    agent_id: str
+    agent_path: str
+    description: str
+    configuration: ResearchConfiguration | None
+    responses: list[ResponseRecord]
+    sources: dict[int, SearchDoc] = Field(default_factory=dict)
+
+
+class IncognitoAgentResponse(BaseModel):
+    replay_digest: str
+    agents: list[IncognitoAgentState] = Field(default_factory=list)
+
+
+def _read_incognito_message(value: dict[str, JsonValue] | Message) -> Message:
+    if not isinstance(value, dict):
+        return value
+    data = dict(value)
+    metadata = PromptMetadata.model_validate(data.pop("metadata", {}))
+    details = data.pop("details", None)
+    message = _MESSAGE_ADAPTER.validate_python(data)
+    message.metadata = metadata
+    if details is not None and isinstance(message, ToolResultMessage):
+        message.details = _INCOGNITO_SOURCE_DETAILS.validate_python(details)
+    return message
+
+
+def serialize_incognito_message(message: Message) -> dict[str, JsonValue]:
+    """Retain replay text and citation sources, excluding execution files and state."""
+    metadata = (
+        message.metadata
+        if isinstance(message.metadata, PromptMetadata)
+        else PromptMetadata()
+    )
+    data: dict[str, JsonValue] = message.model_dump(mode="json", exclude={"details"})
+    data["metadata"] = metadata.model_dump(exclude={"image_files", "image_token_count"})
+    if isinstance(message, ToolResultMessage):
+        if isinstance(message.details, SearchDocsResponse):
+            data["details"] = message.details.model_dump(
+                mode="json", include={"type", "search_docs", "citation_mapping"}
+            )
+        elif isinstance(message.details, ResearchAgentCallResult):
+            data["details"] = message.details.model_dump(mode="json")
+    return data
+
+
+IncognitoMessage = Annotated[
+    Message,
+    BeforeValidator(_read_incognito_message),
+    PlainSerializer(serialize_incognito_message),
+]
+
+
+class IncognitoState(BaseModel):
+    version: int = Field(default=0, ge=0, le=999_999_999_999_999)
+    messages: list[IncognitoMessage] = Field(default_factory=list)
+    previous_run_id: str | None = None
+    responses: dict[str, IncognitoAgentResponse] = Field(default_factory=dict)
 
 
 class FileContextResult(BaseModel):

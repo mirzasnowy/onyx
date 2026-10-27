@@ -31,8 +31,6 @@ from onyx.chat.history_store import RedisChatHistoryStore
 from onyx.chat.incognito_context import (
     _PENDING_TEARDOWNS_KEY,
     INCOGNITO_CONTEXT_TTL_SECONDS,
-    IncognitoContext,
-    IncognitoState,
     _context_key,
     _locked_incognito_state,
     _tombstone_key,
@@ -44,6 +42,8 @@ from onyx.chat.incognito_context import (
     teardown_incognito_session,
 )
 from onyx.chat.models import (
+    IncognitoContext,
+    IncognitoState,
     PromptMetadata,
 )
 from onyx.chat.prompt_formatting import prompt_metadata

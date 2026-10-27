@@ -13,8 +13,7 @@ from onyx.agents.models import AgentStep, StepInput
 from onyx.agents.runtime import Run
 from onyx.chat.agent import ChatAgent
 from onyx.chat.emitter import Emitter
-from onyx.chat.incognito_context import IncognitoState
-from onyx.chat.models import PersonaPromptConfig, PromptMetadata
+from onyx.chat.models import IncognitoState, PersonaPromptConfig, PromptMetadata
 from onyx.chat.presentation import ResponsePresenter, project_response
 from onyx.configs.constants import DocumentSource
 from onyx.context.search.models import SearchDoc, SearchDocsResponse

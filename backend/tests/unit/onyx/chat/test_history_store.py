@@ -12,7 +12,7 @@ from onyx.chat.history_store import (
     RedisChatHistoryStore,
     get_chat_history_store,
 )
-from onyx.chat.incognito_context import IncognitoContext
+from onyx.chat.models import IncognitoContext
 from onyx.chat.response_models import ChatResponseSnapshot
 from onyx.configs.constants import MessageType
 from onyx.db.chat_response import save_chat_response_to_db
