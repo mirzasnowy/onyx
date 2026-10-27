@@ -561,3 +561,17 @@ hoc for a one-off check.
   the sidebar stuck folded.
 
 Shared spreadsheet payload validation lives in `web/src/lib/csv.ts`. Invalid CSV shows a spreadsheet error instead of an empty sheet.
+
+### Session readiness and Stop
+
+The browser keeps input busy until the session status endpoint confirms completion.
+Stream closure alone does not confirm that the answer was saved.
+`lib/chat/sessionReadiness.ts` polls status; `settleChatSession.ts` then reloads saved history.
+The existing processing fence supplies status until the runtime ownership change lands.
+It does not cover preparation before that fence is written.
+
+`stopChatSession.ts` waits for the send acknowledgement before stopping its stream ID.
+A late acknowledgement or history refresh cannot change a newer request.
+Failed status checks leave the session unconfirmed and pause queued messages.
+The input bar offers recovery without discarding submitted text or error details.
+Background completion updates its own session without changing the selected conversation.

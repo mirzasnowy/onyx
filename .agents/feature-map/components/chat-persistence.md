@@ -602,3 +602,10 @@ Database modules import those models instead of defining separate data contracts
 
 Replay includes sources linked only to a tool. Root-selected document versions
 take precedence for answer citations; tool cards retain their own saved versions.
+### Session readiness API
+
+`GET /chat/chat-session/{id}/status` checks session access and returns `is_processing`.
+The existing processing fence supplies this value.
+Session details also include `is_processing`, separately from the resumable stream ID.
+Cache failures do not report readiness: status fails, while saved history remains readable with input blocked.
+Clients must deploy after the additive status endpoint is available.

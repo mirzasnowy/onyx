@@ -130,6 +130,7 @@ from onyx.server.query_and_chat.models import (
     ChatSessionDetailResponse,
     ChatSessionDetails,
     ChatSessionGroup,
+    ChatSessionProcessingStatus,
     ChatSessionsResponse,
     ChatSessionSummary,
     ChatSessionUpdateRequest,
@@ -431,11 +432,15 @@ def get_chat_session(
     ]
 
     current_stream: CurrentStreamInfo | None = None
+    is_processing = True
     try:
-        stream_id = get_processing_stream_id(session_id, get_cache_backend())
+        cache = get_cache_backend()
+        is_processing = is_chat_session_processing(session_id, cache)
+        stream_id = get_processing_stream_id(session_id, cache)
         if stream_id is not None:
             current_stream = CurrentStreamInfo(stream_id=stream_id)
     except Exception:
+        is_processing = True
         logger.exception(
             "An error occurred while checking if the chat session is processing"
         )
@@ -465,6 +470,7 @@ def get_chat_session(
         # Packets are now directly serialized as Packet Pydantic models
         packets=replay_packet_lists,
         current_stream=current_stream,
+        is_processing=is_processing,
         incognito=chat_session.incognito_record_mode is not None,
     )
 
@@ -1291,6 +1297,27 @@ def search_chats(
 # ~32 KiB decompressed per chunk → ~1 MiB peak per read; a full-buffer replay
 # would otherwise materialize up to the whole decompressed buffer at once.
 _RESUME_MAX_CHUNKS_PER_READ = 32
+
+
+@router.get("/chat-session/{session_id}/status")
+def get_chat_session_processing_status(
+    session_id: UUID,
+    user: User = Depends(
+        require_permission(Permission.READ_CHAT, allow_anonymous=True)
+    ),
+) -> ChatSessionProcessingStatus:
+    with get_session_with_current_tenant() as db_session:
+        try:
+            get_chat_session_by_id(
+                chat_session_id=session_id,
+                user_id=user.id,
+                db_session=db_session,
+            )
+        except ValueError as error:
+            raise OnyxError(OnyxErrorCode.SESSION_NOT_FOUND) from error
+    return ChatSessionProcessingStatus(
+        is_processing=is_chat_session_processing(session_id, get_cache_backend())
+    )
 
 
 @router.get("/chat-session/{session_id}/resume-stream")

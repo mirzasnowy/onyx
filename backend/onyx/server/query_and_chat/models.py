@@ -266,6 +266,10 @@ class CurrentStreamInfo(BaseModel):
     stream_id: int
 
 
+class ChatSessionProcessingStatus(BaseModel):
+    is_processing: bool
+
+
 class ChatSessionDetailResponse(BaseModel):
     chat_session_id: UUID
     description: str | None
@@ -284,6 +288,8 @@ class ChatSessionDetailResponse(BaseModel):
     # Set while a stream is in flight and resumable: cursor-0 replay+tail is
     # available at /chat-session/{id}/resume-stream.
     current_stream: CurrentStreamInfo | None = None
+    # Readiness is independent of whether a stream can be replayed.
+    is_processing: bool = False
     # True for sessions pinned to an incognito record mode, so a reload can
     # restore the incognito UI state.
     incognito: bool = False
