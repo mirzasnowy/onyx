@@ -22,12 +22,12 @@ from onyx.agents.models import ExecutionStatus, RunStatus, StepRecord
 from onyx.cache.factory import get_cache_backend
 from onyx.cache.interface import CacheBackendType
 from onyx.chat.incognito_context import (
+    _PENDING_TEARDOWNS_KEY,
     INCOGNITO_CONTEXT_TTL_SECONDS,
     IncognitoContext,
+    IncognitoState,
     _context_key,
     _locked_incognito_state,
-    _pending_teardowns,
-    _StoredState,
     _tombstone_key,
     _update_incognito_state,
     incognito_context_available,
@@ -36,7 +36,9 @@ from onyx.chat.incognito_context import (
     save_incognito_context,
     teardown_incognito_session,
 )
-from onyx.chat.models import PromptMetadata
+from onyx.chat.models import (
+    PromptMetadata,
+)
 from onyx.chat.prompt_formatting import prompt_metadata
 from onyx.chat.response_models import ResponseRecord
 from onyx.chat.stream_buffer import _chunk_key
@@ -460,7 +462,7 @@ def test_lost_lock_retries_against_fresh_envelope(max_attempts: int) -> None:
     cache = get_cache_backend()
     observed: list[int] = []
 
-    def update(state: _StoredState | None) -> _StoredState:
+    def update(state: IncognitoState | None) -> IncognitoState:
         assert state is not None
         observed.append(state.version)
         if len(observed) == 1:
@@ -482,7 +484,7 @@ def test_lost_lock_stops_after_bounded_retries() -> None:
     cache = get_cache_backend()
     calls = 0
 
-    def update(state: _StoredState | None) -> _StoredState:
+    def update(state: IncognitoState | None) -> IncognitoState:
         nonlocal calls
         assert state is not None
         calls += 1
@@ -500,7 +502,7 @@ def test_rejected_transformation_keeps_stored_state_unchanged() -> None:
     cache = get_cache_backend()
     before = cache.get(_context_key(session_id))
 
-    def update(state: _StoredState | None) -> None:
+    def update(state: IncognitoState | None) -> None:
         assert state is not None
         state.messages.clear()
         return None
@@ -525,52 +527,58 @@ def test_busy_teardown_fences_access_then_retries(enqueue_fails: bool) -> None:
             ):
                 teardown_incognito_session(session_id)
         assert load_incognito_context(session_id).messages == []
-        assert session_id in _pending_teardowns(cache)
+        assert str(session_id).encode() in cache.set_members(
+            _PENDING_TEARDOWNS_KEY, limit=100
+        )
         retry_incognito_teardowns()
-        assert session_id in _pending_teardowns(cache)
+        assert str(session_id).encode() in cache.set_members(
+            _PENDING_TEARDOWNS_KEY, limit=100
+        )
     retry_incognito_teardowns()
     assert cache.exists(_tombstone_key(session_id))
     assert cache.get(_context_key(session_id)) is None
     assert cache.get(_chunk_key(session_id, 1, 0)) is None
-    assert session_id not in _pending_teardowns(cache)
-
-
-def test_full_cleanup_index_preserves_existing_work_and_cleans_current_session() -> (
-    None
-):
-    session_id, pending = uuid4(), uuid4()
-    assert _save(session_id, [_message("private")])
-    cache = get_cache_backend()
-    from onyx.chat.incognito_context import _update_pending_teardown
-
-    _update_pending_teardown(cache, pending, add=True)
-    with patch("onyx.chat.incognito_context._MAX_PENDING_TEARDOWN_BYTES", 50):
-        teardown_incognito_session(session_id)
-    assert _pending_teardowns(cache) == [pending]
-    assert cache.get(_context_key(session_id)) is None
-    assert cache.exists(_tombstone_key(session_id))
-
-
-def test_full_cleanup_index_reports_busy_cleanup_without_reopening_session() -> None:
-    session_id, pending = uuid4(), uuid4()
-    assert _save(session_id, [_message("private")])
-    cache = get_cache_backend()
-    from onyx.chat.incognito_context import (
-        _IncognitoLockError,
-        _update_pending_teardown,
+    assert str(session_id).encode() not in cache.set_members(
+        _PENDING_TEARDOWNS_KEY, limit=100
     )
 
-    _update_pending_teardown(cache, pending, add=True)
-    with _locked_incognito_state(session_id):
+
+def test_busy_cleanup_does_not_block_other_sessions() -> None:
+    busy, available = uuid4(), uuid4()
+    for session_id in (busy, available):
+        assert _save(session_id, [_message("private")])
+    cache = get_cache_backend()
+    with _locked_incognito_state(busy):
         with (
-            patch("onyx.chat.incognito_context._MAX_PENDING_TEARDOWN_BYTES", 50),
             patch("onyx.chat.incognito_context._STATE_LOCK_WAIT_SECONDS", 0),
+            patch("onyx.chat.incognito_context._enqueue_incognito_teardown_retry"),
         ):
-            with pytest.raises(_IncognitoLockError):
-                teardown_incognito_session(session_id)
-    assert _pending_teardowns(cache) == [pending]
-    assert load_incognito_context(session_id).messages == []
-    assert not _save(session_id, [_message("late")])
+            teardown_incognito_session(busy)
+            teardown_incognito_session(available)
+        assert str(busy).encode() in cache.set_members(
+            _PENDING_TEARDOWNS_KEY, limit=100
+        )
+        assert str(available).encode() not in cache.set_members(
+            _PENDING_TEARDOWNS_KEY, limit=100
+        )
+        assert cache.get(_context_key(available)) is None
+    retry_incognito_teardowns()
+    assert cache.get(_context_key(busy)) is None
+    assert str(busy).encode() not in cache.set_members(
+        _PENDING_TEARDOWNS_KEY, limit=100
+    )
+
+
+def test_cleanup_retry_bounds_each_batch_and_retains_remaining_work() -> None:
+    cache = get_cache_backend()
+    sessions = [uuid4() for _ in range(105)]
+    for session_id in sessions:
+        cache.set_add(_PENDING_TEARDOWNS_KEY, str(session_id))
+    retry_incognito_teardowns()
+    pending = cache.set_members(_PENDING_TEARDOWNS_KEY, limit=200)
+    assert len(pending) == 5
+    retry_incognito_teardowns()
+    assert cache.set_members(_PENDING_TEARDOWNS_KEY, limit=200) == []
 
 
 def test_postgres_rejection_happens_before_cache_access() -> None:

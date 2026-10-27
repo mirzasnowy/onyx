@@ -37,14 +37,18 @@ def test_redis_prefix_deletion_does_not_cross_tenants() -> None:
     tenants = [f"prefix_test_{uuid4().hex}" for _ in range(2)]
     clients = [RedisCacheBackend(redis_pool.get_client(tenant)) for tenant in tenants]
     try:
-        for client in clients:
+        for index, client in enumerate(clients):
             client.set("same:key", b"private")
+            client.set_add("same:set", str(index))
+        assert clients[0].set_members("same:set", limit=10) == [b"0"]
+        assert clients[1].set_members("same:set", limit=10) == [b"1"]
         clients[0].delete_prefix("same:")
         assert clients[0].get("same:key") is None
         assert clients[1].get("same:key") == b"private"
     finally:
-        for client in clients:
+        for index, client in enumerate(clients):
             client.delete("same:key")
+            client.set_remove("same:set", str(index))
 
 
 def test_postgres_prefix_deletion_does_not_cross_tenants(db_session: Session) -> None:
@@ -59,8 +63,11 @@ def test_postgres_prefix_deletion_does_not_cross_tenants(db_session: Session) ->
             )
         db_session.commit()
         clients = [PostgresCacheBackend(schema) for schema in schemas]
-        for client in clients:
+        for index, client in enumerate(clients):
             client.set("same:key", b"test value")
+            client.set_add("same:set", str(index))
+        assert clients[0].set_members("same:set", limit=10) == [b"0"]
+        assert clients[1].set_members("same:set", limit=10) == [b"1"]
         clients[0].delete_prefix("same:")
         assert clients[0].get("same:key") is None
         assert clients[1].get("same:key") == b"test value"
@@ -82,3 +89,20 @@ def test_prefix_deletion_covers_multiple_scan_batches(cache: CacheBackend) -> No
     finally:
         for key in keys:
             cache.delete(key)
+
+
+def test_batch_exists_excludes_expired_values(cache: CacheBackend) -> None:
+    prefix = f"existence_{uuid4().hex}:"
+    live, expired, missing = [
+        prefix + suffix for suffix in ("live", "expired", "missing")
+    ]
+    try:
+        cache.set(live, b"private content")
+        cache.set(expired, b"expired content")
+        cache.expire(expired, 0)
+        missing_keys = [f"{missing}:{index}" for index in range(1001)]
+        assert cache.exists_many([live, expired, *missing_keys, live]) == {live}
+        assert cache.exists_many([]) == set()
+    finally:
+        cache.delete(live)
+        cache.delete(expired)

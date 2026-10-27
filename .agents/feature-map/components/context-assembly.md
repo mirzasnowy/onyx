@@ -409,7 +409,7 @@ session's contract. Only `FULL_HISTORY` writes assembled content into
 (`incognito.py:content_free_file_descriptors`) and instead carries the live
 conversation in an out-of-Postgres store for the session's lifetime
 (`incognito_context.py:load_incognito_context`,
-`incognito_context.py:append_incognito_message`).
+`incognito_context.py:append_incognito_messages`).
 
 `incognito_context.py` stores canonical root messages and child response records in one JSON envelope.
 The envelope has a sliding one-hour TTL, a one-megabyte limit, and at most 200 root messages.
@@ -430,12 +430,12 @@ Its TTL covers the history and stream-buffer lifetimes. Cleanup removes the enve
 It matches literal prefixes within one tenant. Redis and Postgres implement the same operation.
 The operation does not stop concurrent writers; stream writers still check session teardown and clean up on completion.
 
-A separate lock protects a bounded JSON list of pending cleanup IDs.
-Retry work takes at most 100 IDs and releases the index lock before taking session locks.
+A cache set tracks pending cleanup IDs, registered before teardown fences the session.
+Retry work reads at most 100 members without scanning unrelated cache keys.
 A busy session queues the existing cleanup task after 60 seconds; periodic cleanup also retries it.
-IDs remain queued until history and buffered output are removed, even if task publication fails.
-If the one-megabyte index is full, teardown attempts immediate cleanup without removing existing requests.
-If that also fails, the caller receives an error. The tombstone remains, and content still expires normally.
+IDs remain until history and buffered output are removed, even if task publication fails.
+Set insertion is atomic and requires no application-level index lock.
+Session liveness checks batch key existence without loading conversation content.
 
 Lock acquisition waits at most five seconds per attempt; the lease lasts 60 seconds.
 Ownership checks and bounded retries follow the existing lock policy. They do not make lease expiry and writes atomic.
@@ -638,3 +638,6 @@ cd backend && uv run pytest tests/integration -k chat
   actual tool set for the turn is known. It will overshoot the real prompt size
   on any turn that does not use every tool; this is intentional slack, not a
   bug to tighten.
+
+Historical search sources are restored, but query expansion resets for each new turn.
+Invalid forced-tool selections and unsupported deep-research requests return `BAD_REQUEST`.

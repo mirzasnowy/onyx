@@ -42,12 +42,11 @@ _STATE_LOCK_SECONDS: float = 60.0
 _STATE_LOCK_WAIT_SECONDS: float = 5.0
 _MAX_CONTEXT_MESSAGES = 200
 _MAX_CONTEXT_BYTES = 1_000_000
-_MAX_PENDING_TEARDOWN_BYTES = 1_000_000
+_MAX_TEARDOWNS_PER_RETRY = 100
 _MAX_COMMIT_ATTEMPTS = 8
 _KEY_PREFIX = "incognito_ctx:v2"
 _PENDING_TEARDOWNS_KEY = f"{_KEY_PREFIX}:pending_teardowns"
 _MESSAGE_ADAPTER: TypeAdapter[Message] = TypeAdapter(Message)
-_PENDING_ADAPTER = TypeAdapter(list[UUID])
 _MESSAGE_JSON_ADAPTER = TypeAdapter(dict[str, JsonValue])
 
 
@@ -75,7 +74,7 @@ class IncognitoContext(BaseModel):
     previous_run_id: str | None = None
 
 
-class _IncognitoAgent(BaseModel):
+class IncognitoAgentState(BaseModel):
     parent_agent_id: str | None = None
     agent_id: str
     agent_path: str
@@ -87,10 +86,10 @@ class _IncognitoAgent(BaseModel):
 
 class IncognitoAgentResponse(BaseModel):
     replay_digest: str
-    agents: list[_IncognitoAgent] = Field(default_factory=list)
+    agents: list[IncognitoAgentState] = Field(default_factory=list)
 
 
-class _StoredState(BaseModel):
+class IncognitoState(BaseModel):
     version: int = Field(default=0, ge=0, le=999_999_999_999_999)
     messages: list[dict[str, JsonValue]] = Field(default_factory=list)
     previous_run_id: str | None = None
@@ -116,13 +115,13 @@ def _tombstone_key(chat_session_id: UUID) -> str:
     return f"{_context_key(chat_session_id)}:ended"
 
 
-def _decode_state(raw: bytes | None) -> _StoredState:
+def _decode_state(raw: bytes | None) -> IncognitoState:
     if raw is None:
-        return _StoredState()
+        return IncognitoState()
     try:
         if len(raw) > _MAX_CONTEXT_BYTES:
             raise ValueError("Temporary history exceeds its storage limit")
-        state = _StoredState.model_validate_json(raw)
+        state = IncognitoState.model_validate_json(raw)
         if any(not key.isdigit() for key in state.responses):
             raise ValueError("Invalid response identity")
         for message in state.messages:
@@ -130,10 +129,10 @@ def _decode_state(raw: bytes | None) -> _StoredState:
         return state
     except (ValidationError, ValueError, TypeError, KeyError):
         logger.warning("Dropping unreadable temporary history")
-        return _StoredState()
+        return IncognitoState()
 
 
-def _read_state(cache: CacheBackend, chat_session_id: UUID) -> _StoredState | None:
+def _read_state(cache: CacheBackend, chat_session_id: UUID) -> IncognitoState | None:
     if cache.exists(_tombstone_key(chat_session_id)):
         return None
     raw = cache.get(_context_key(chat_session_id))
@@ -142,7 +141,7 @@ def _read_state(cache: CacheBackend, chat_session_id: UUID) -> _StoredState | No
     return _decode_state(raw)
 
 
-def _context(state: _StoredState | None) -> IncognitoContext:
+def _context(state: IncognitoState | None) -> IncognitoContext:
     if state is None:
         return IncognitoContext(version=0, messages=[])
     return IncognitoContext(
@@ -162,8 +161,8 @@ def _retained_state(
     *,
     protected_response: str | None = None,
     required_messages: int = 1,
-) -> _StoredState:
-    state = _StoredState(
+) -> IncognitoState:
+    state = IncognitoState(
         version=context.version + 1,
         messages=[
             _write_message(item) for item in context.messages[-_MAX_CONTEXT_MESSAGES:]
@@ -199,19 +198,18 @@ class _IncognitoLockError(RuntimeError):
     """The session state lock could not be acquired or was lost."""
 
 
-class _PendingCleanupFull(RuntimeError):
-    """The cleanup index cannot accept another session without losing work."""
-
-
 @contextmanager
-def _locked_cache(
-    cache: CacheBackend, key: str, *, blocking: bool = True
-) -> Generator[CacheLock, None, None]:
-    lock = cache.lock(key, timeout=_STATE_LOCK_SECONDS)
+def _locked_incognito_state(
+    chat_session_id: UUID, *, blocking: bool = True
+) -> Generator[tuple[CacheBackend, CacheLock], None, None]:
+    cache = _cache()
+    lock = cache.lock(
+        f"{_context_key(chat_session_id)}:lock", timeout=_STATE_LOCK_SECONDS
+    )
     if not lock.acquire(blocking=blocking, blocking_timeout=_STATE_LOCK_WAIT_SECONDS):
         raise _IncognitoLockError("Incognito state is busy")
     try:
-        yield lock
+        yield cache, lock
     finally:
         try:
             lock.release()
@@ -219,20 +217,9 @@ def _locked_cache(
             logger.warning("Incognito state lock expired")
 
 
-@contextmanager
-def _locked_incognito_state(
-    chat_session_id: UUID, *, blocking: bool = True
-) -> Generator[tuple[CacheBackend, CacheLock], None, None]:
-    cache = _cache()
-    with _locked_cache(
-        cache, f"{_context_key(chat_session_id)}:lock", blocking=blocking
-    ) as lock:
-        yield cache, lock
-
-
 def _update_incognito_state(
     chat_session_id: UUID,
-    update: Callable[[_StoredState | None], _StoredState | None],
+    update: Callable[[IncognitoState | None], IncognitoState | None],
     *,
     max_attempts: int = 1,
 ) -> bool:
@@ -261,15 +248,15 @@ def _update_incognito_state(
                 )
                 return True
         except _IncognitoLockError:
-            continue
+            logger.debug("Retrying incognito state write after lock contention or loss")
     return False
 
 
 def save_incognito_context(chat_session_id: UUID, context: IncognitoContext) -> bool:
     """Replace only the root context version the caller read."""
 
-    def update(state: _StoredState | None) -> _StoredState | None:
-        current = state or _StoredState()
+    def update(state: IncognitoState | None) -> IncognitoState | None:
+        current = state or IncognitoState()
         if current.version != context.version:
             return None
         return _retained_state(context, current.responses)
@@ -299,6 +286,7 @@ def append_incognito_messages(
                 chat_session_id,
             )
     except Exception:
+        # Serialization failures can include private message text in their exceptions.
         logger.error(
             "Failed to persist incognito context for session %s", chat_session_id
         )
@@ -309,42 +297,25 @@ def incognito_session_torn_down(chat_session_id: UUID) -> bool:
 
 
 def incognito_sessions_ended(chat_session_ids: Collection[UUID]) -> set[UUID]:
-    cache = _cache()
+    if not chat_session_ids:
+        return set()
+    existing = _cache().exists_many(
+        [
+            key
+            for session_id in chat_session_ids
+            for key in (_tombstone_key(session_id), _context_key(session_id))
+        ]
+    )
     return {
         session_id
         for session_id in chat_session_ids
-        if cache.exists(_tombstone_key(session_id))
-        or not cache.exists(_context_key(session_id))
+        if _tombstone_key(session_id) in existing
+        or _context_key(session_id) not in existing
     }
 
 
 def incognito_session_ended(chat_session_id: UUID) -> bool:
     return bool(incognito_sessions_ended([chat_session_id]))
-
-
-def _pending_teardowns(cache: CacheBackend) -> list[UUID]:
-    raw = cache.get(_PENDING_TEARDOWNS_KEY)
-    return _PENDING_ADAPTER.validate_json(raw) if raw is not None else []
-
-
-def _update_pending_teardown(
-    cache: CacheBackend, session_id: UUID, *, add: bool
-) -> None:
-    with _locked_cache(cache, f"{_PENDING_TEARDOWNS_KEY}:lock") as lock:
-        pending = _pending_teardowns(cache)
-        if add and session_id not in pending:
-            pending.append(session_id)
-        elif not add:
-            pending = [item for item in pending if item != session_id]
-        payload = _PENDING_ADAPTER.dump_json(pending)
-        if len(payload) > _MAX_PENDING_TEARDOWN_BYTES:
-            raise _PendingCleanupFull("Temporary history cleanup index is full")
-        if not lock.owned():
-            raise _IncognitoLockError("Incognito cleanup index lock was lost")
-        if pending:
-            cache.set(_PENDING_TEARDOWNS_KEY, payload)
-        else:
-            cache.delete(_PENDING_TEARDOWNS_KEY)
 
 
 def _finish_incognito_teardown(chat_session_id: UUID, *, blocking: bool = True) -> None:
@@ -354,51 +325,39 @@ def _finish_incognito_teardown(chat_session_id: UUID, *, blocking: bool = True) 
         cache.set(_tombstone_key(chat_session_id), 1, ex=_TOMBSTONE_TTL_SECONDS)
         cache.delete(_context_key(chat_session_id))
     cache.delete_prefix(stream_buffer_key_pattern(chat_session_id).removesuffix("*"))
-    _update_pending_teardown(cache, chat_session_id, add=False)
+    cache.set_remove(_PENDING_TEARDOWNS_KEY, str(chat_session_id))
 
 
 def teardown_incognito_session(chat_session_id: UUID) -> None:
     """Fence access immediately and retain failed cleanup for worker retries."""
     cache = _cache()
+    # Register before fencing so a busy session or failed cleanup remains discoverable.
+    cache.set_add(_PENDING_TEARDOWNS_KEY, str(chat_session_id))
     cache.set(_tombstone_key(chat_session_id), 1, ex=_TOMBSTONE_TTL_SECONDS)
-    try:
-        _update_pending_teardown(cache, chat_session_id, add=True)
-    except _PendingCleanupFull:
-        # Do not evict another session's cleanup. A failure here remains visible
-        # to the caller; the tombstone and content TTL still prevent reuse.
-        _finish_incognito_teardown(chat_session_id)
-        return
     try:
         _finish_incognito_teardown(chat_session_id)
     except _IncognitoLockError:
         try:
             _enqueue_incognito_teardown_retry()
         except Exception:
-            logger.error("Could not enqueue incognito teardown retry")
+            logger.exception("Could not enqueue incognito teardown retry")
 
 
 def retry_incognito_teardowns() -> None:
-    """Process a bounded batch without holding the index lock during cleanup."""
+    """Retry a bounded batch without waiting for busy sessions."""
     if not incognito_context_available():
         return
     cache = _cache()
-    for session_id in _pending_teardowns(cache)[:100]:
+    for member in cache.set_members(
+        _PENDING_TEARDOWNS_KEY, limit=_MAX_TEARDOWNS_PER_RETRY
+    ):
+        session_id = UUID(member.decode())
         try:
             _finish_incognito_teardown(session_id, blocking=False)
         except _IncognitoLockError:
-            continue
+            logger.debug("Incognito cleanup deferred for busy session %s", session_id)
         except Exception:
-            logger.error("Incognito teardown retry failed for %s", session_id)
-
-
-def _read_agent_fields(
-    chat_session_id: UUID, message_ids: Sequence[int]
-) -> list[IncognitoAgentResponse | None]:
-    state = _read_state(_cache(), chat_session_id)
-    return [
-        state.responses.get(str(message_id)) if state else None
-        for message_id in message_ids
-    ]
+            logger.exception("Incognito teardown retry failed for %s", session_id)
 
 
 def _enqueue_incognito_teardown_retry() -> None:
@@ -416,19 +375,22 @@ def _enqueue_incognito_teardown_retry() -> None:
 
 def _incognito_records(
     chat_session_id: UUID, visible_message_ids: Sequence[int]
-) -> list[_IncognitoAgent]:
+) -> list[IncognitoAgentState]:
     if not visible_message_ids:
+        return []
+    state = _read_state(_cache(), chat_session_id)
+    if state is None:
         return []
     return [
         agent
-        for raw in reversed(_read_agent_fields(chat_session_id, visible_message_ids))
-        if raw is not None
-        for agent in raw.agents
+        for message_id in reversed(visible_message_ids)
+        if (response := state.responses.get(str(message_id))) is not None
+        for agent in response.agents
     ]
 
 
-def _incognito_metadata(records: list[_IncognitoAgent]) -> dict[str, AgentInfo]:
-    by_id: dict[str, _IncognitoAgent] = {}
+def _incognito_metadata(records: list[IncognitoAgentState]) -> dict[str, AgentInfo]:
+    by_id: dict[str, IncognitoAgentState] = {}
     for agent in records:
         by_id.pop(agent.agent_id, None)
         by_id[agent.agent_id] = agent
@@ -548,14 +510,14 @@ def _response_records(
     replay_digest: str,
 ) -> IncognitoAgentResponse:
     records = IncognitoAgentResponse(replay_digest=replay_digest)
-    local: dict[str, _IncognitoAgent] = {}
+    local: dict[str, IncognitoAgentState] = {}
 
     def append(run: ResponseRecord, parent_id: str | None = None) -> None:
         if run.agent_id is None:
             raise ValueError("Temporary agent runs require agent and run identities")
         saved = local.get(run.agent_id)
         if saved is None:
-            saved = _IncognitoAgent(
+            saved = IncognitoAgentState(
                 agent_id=run.agent_id,
                 agent_path=run.agent_path,
                 parent_agent_id=parent_id,
@@ -604,7 +566,7 @@ def save_incognito_response(
     response_key = str(message_id)
     already_saved = False
 
-    def update(state: _StoredState | None) -> _StoredState | None:
+    def update(state: IncognitoState | None) -> IncognitoState | None:
         nonlocal already_saved
         already_saved = False
         if state is None:
