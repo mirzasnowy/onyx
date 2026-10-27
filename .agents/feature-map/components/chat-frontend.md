@@ -577,8 +577,8 @@ Failed status checks leave the session unconfirmed and pause queued messages.
 The input bar offers recovery without discarding submitted text or error details.
 Background completion updates its own session without changing the selected conversation.
 
-Settlement preserves live incognito messages because saved history can contain only usage
-metadata. Server readiness still gates the next send.
+Recovery loading and settlement preserve local incognito messages because saved history can
+contain only usage metadata. Server readiness still gates the next send.
 
 `AgentMessage` reports when its final content has finished rendering. For multi-model turns,
 `MultiModelResponseView` waits for all visible successful panels before releasing queued
