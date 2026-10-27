@@ -53,6 +53,7 @@ from onyx.tools.restoration import (
     capture_search_state,
     restore_search_state,
 )
+from onyx.tools.results import ResearchAgentCallResult
 from onyx.tools.tool_implementations.search.search_tool import SearchTool
 from onyx.tools.tool_implementations.web_search.utils import extract_url_snippet_map
 from onyx.tracing.flows import LLMFlow
@@ -194,6 +195,14 @@ class ChatAgent(Agent, RestorableFeature):
             if isinstance(data, SearchDocsResponse):
                 self.citation_mapping.update(data.citation_mapping)
                 self.gathered_documents.extend(data.search_docs)
+            elif isinstance(data, ResearchAgentCallResult):
+                self.citation_mapping.update(
+                    {
+                        number: doc.document_id
+                        for number, doc in data.citation_mapping.items()
+                    }
+                )
+                self.gathered_documents.extend(data.citation_mapping.values())
             if isinstance(data, ChatSearchResult):
                 existing = {file.filename for file in self.chat_files}
                 self.chat_files.extend(
