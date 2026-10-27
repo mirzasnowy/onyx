@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { ApiService } from "../src/services/api-service";
 import { OnyxChatWidget } from "../src/widget";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  mock.restore();
 });
 
 describe("widget readiness", () => {
@@ -45,6 +46,40 @@ describe("widget readiness", () => {
     );
     expect(unconfirmed).toHaveBeenCalledTimes(2);
     expect(calls).toBe(3);
+  });
+
+  it("retries a stalled status request without releasing Send early", async () => {
+    const deadline = new AbortController();
+    const timeout = spyOn(AbortSignal, "timeout")
+      .mockImplementation(() => new AbortController().signal)
+      .mockReturnValueOnce(deadline.signal);
+    let calls = 0;
+    globalThis.fetch = mock(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        calls++;
+        if (calls > 1) return Response.json({ is_processing: false });
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true }
+          );
+          queueMicrotask(() =>
+            deadline.abort(new DOMException("Request timed out", "TimeoutError"))
+          );
+        });
+      }
+    ) as typeof fetch;
+    const unconfirmed = mock(() => {});
+    const api = new ApiService("https://onyx.test/api", async () => "key");
+    await api.waitForSessionIdle(
+      "session",
+      new AbortController().signal,
+      unconfirmed
+    );
+    expect(timeout).toHaveBeenCalledWith(10_000);
+    expect(unconfirmed).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(2);
   });
 
   it("cancels polling when a reset replaces the conversation", async () => {

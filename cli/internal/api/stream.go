@@ -32,7 +32,12 @@ func (c *Client) SendMessageStream(
 		streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 		done := make(chan struct{})
-		defer close(done)
+		cancellationDone := make(chan struct{})
+		defer func() {
+			close(done)
+			// The one-shot CLI can exit as soon as its event channel closes.
+			<-cancellationDone
+		}()
 		type identity struct {
 			session string
 			stream  int
@@ -44,6 +49,7 @@ func (c *Client) SendMessageStream(
 			c.StopChatSession(stopCtx, id.session, id.stream)
 		}
 		go func() {
+			defer close(cancellationDone)
 			select {
 			case <-ctx.Done():
 			case <-done:
@@ -161,7 +167,6 @@ func (c *Client) SendMessageStream(
 				case ch <- event:
 				case <-ctx.Done():
 					// Continue reading for acknowledgement; the cancellation worker is bounded.
-
 				}
 			}
 		}

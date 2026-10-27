@@ -469,5 +469,6 @@ Cross-links: [[chat-frontend]], [[core-chat-loop]], [[streaming-protocol]],
 The widget keeps Send disabled after a STOP packet and after delivery ends.
 `widget/src/services/api-service.ts:ApiService.waitForSessionIdle` confirms server idle
 through the authenticated session status endpoint. Failed checks retry without enabling
-Send. Each poll resolves the current credential. Reset replaces the request controller;
+Send. Each request has a ten-second deadline; the wait has no overall deadline.
+Each poll resolves the current credential. Reset replaces the request controller;
 an old callback cannot change the new conversation. Failed sends retain their draft.

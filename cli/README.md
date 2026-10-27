@@ -327,3 +327,4 @@ The `ask` command confirms idle before naming the saved conversation.
 Cancellation waits for the response ID before sending Stop. The request owns that ID,
 so a delayed Stop cannot cancel a later turn. If acknowledgement never arrives,
 cancellation closes delivery after ten seconds without sending an unscoped Stop.
+For acknowledged runs, delivery closes after the bounded Stop request completes.

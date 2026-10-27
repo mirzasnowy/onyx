@@ -43,6 +43,7 @@ import { useSession } from "@/state/session";
 
 // the run can finish before the ChatSession row is committed; let it settle before naming (web too)
 const AUTO_NAME_DELAY_MS = 200;
+const STOP_ACK_TIMEOUT_MS = 10_000;
 
 interface AutoNameContext {
   serverUrl: string | null;
@@ -399,13 +400,27 @@ export function useChatController(
     if (sessionId == null) return;
     const store = useChatSessionStore.getState();
     const current = store.sessions.get(sessionId);
-    if (!current?.abortController) return;
+    if (!current?.abortController || current.stopRequested) return;
     store.requestStop(sessionId);
     // Keep reading until acknowledgement, so Stop cannot target a later request.
     if (current.streamId !== null) {
       void stopChatSession(sessionId, current.streamId).catch(() => {});
       current.abortController.abort();
+      return;
     }
+    // A lost acknowledgement must not prevent Stop from reaching the readiness check.
+    const controller = current.abortController;
+    const timeout = setTimeout(() => {
+      if (
+        useChatSessionStore.getState().sessions.get(sessionId)
+          ?.abortController === controller
+      ) {
+        controller.abort();
+      }
+    }, STOP_ACK_TIMEOUT_MS);
+    controller.signal.addEventListener("abort", () => clearTimeout(timeout), {
+      once: true,
+    });
   }, [sessionId]);
 
   return {

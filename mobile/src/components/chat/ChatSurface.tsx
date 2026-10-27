@@ -148,9 +148,7 @@ function ChatSurfaceContent({ focus }: { focus: ChatFocus }) {
       message ?? draft.text,
       draft.descriptors,
       () => {
-        // Clear this draft only after the server acknowledges the request, and
-        // everything from here to the route change is synchronous. That makes it the one moment
-        // we can say "this send created the session", which a null → non-null id alone cannot.
+        // Acknowledgement consumes only the submitted draft, preserving edits made while waiting.
         if (sessionId == null) composerTools.notePendingSend(sentWithAgent);
         clearDraft();
       },

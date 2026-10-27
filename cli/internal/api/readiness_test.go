@@ -131,3 +131,46 @@ func TestCancellationAtDeliveryEndStillStopsAcknowledgedRun(t *testing.T) {
 		server.Close()
 	}
 }
+
+func TestCancelledDeliveryWaitsForStopRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stopStarted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/chat/stop-chat-session/session" {
+			close(stopStarted)
+			<-releaseStop
+			return
+		}
+		fmt.Fprintln(w, `{"chat_session_id":"session"}`)
+		fmt.Fprintln(w, `{"user_message_id":10,"reserved_assistant_message_id":11}`)
+		cancel()
+	}))
+	defer server.Close()
+	events := testutil.NewClient(server.URL).SendMessageStream(ctx, "hello", nil, 0, nil, nil, nil)
+	deliveryDone := make(chan struct{})
+	defer func() {
+		close(releaseStop)
+		select {
+		case <-deliveryDone:
+		case <-time.After(time.Second):
+			t.Error("delivery did not close after Stop completed")
+		}
+	}()
+	go func() {
+		for range events {
+		}
+		close(deliveryDone)
+	}()
+	select {
+	case <-stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Stop request did not start")
+	}
+	select {
+	case <-deliveryDone:
+		t.Fatal("delivery closed before Stop completed; the CLI can exit without cancelling the run")
+	case <-time.After(20 * time.Millisecond):
+	}
+}

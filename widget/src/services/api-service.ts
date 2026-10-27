@@ -10,6 +10,8 @@ import {
 } from "@/types/api-types";
 import { TokenProvider } from "@/types/widget-types";
 
+const READINESS_REQUEST_TIMEOUT_MS = 10_000;
+
 export class ApiService {
   private maxRetries = 3;
   private retryDelay = 1000;
@@ -61,9 +63,15 @@ export class ApiService {
   ): Promise<void> {
     while (!signal.aborted) {
       try {
-        const response = await this.fetchWithRetry(
+        const response = await fetch(
           `${this.backendUrl}/chat/chat-session/${sessionId}/status`,
-          async () => ({ headers: await this.getHeaders(), signal })
+          {
+            headers: await this.getHeaders(),
+            signal: AbortSignal.any([
+              signal,
+              AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
+            ]),
+          }
         );
         if (!response.ok) throw new Error("Cannot confirm chat readiness");
         const status: unknown = await response.json();

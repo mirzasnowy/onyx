@@ -679,6 +679,48 @@ describe("useChatController", () => {
     expect(stopSessionMock).toHaveBeenCalledWith("s1", 11);
   });
 
+  it("stops waiting for a missing acknowledgement without sending an unscoped Stop", async () => {
+    jest.useFakeTimers();
+    try {
+      useChatSessionStore.getState().ensureSession("s1");
+      const status = Promise.withResolvers<{ is_processing: boolean }>();
+      jest
+        .mocked(getChatSessionStatus)
+        .mockResolvedValueOnce({ is_processing: false })
+        .mockReturnValueOnce(status.promise);
+      streamMock.mockImplementation((_body, signal) =>
+        (async function* (): AsyncGenerator<StreamEvent> {
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+        })(),
+      );
+      const { result, unmount } = renderHook(() => useChatController("s1"), {
+        wrapper,
+      });
+      await act(async () => {
+        await result.current.submit("hi");
+      });
+      act(() => result.current.stop());
+      await act(async () => {
+        jest.advanceTimersByTime(10_000);
+      });
+      expect(stopSessionMock).not.toHaveBeenCalled();
+      expect(result.current.chatState).toBe("settling");
+      await act(async () => {
+        await result.current.submit("too soon");
+      });
+      expect(streamMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        status.resolve({ is_processing: false });
+      });
+      expect(result.current.chatState).toBe("input");
+      unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it("does not release a newer owner after an old readiness check", async () => {
     useChatSessionStore.getState().ensureSession("s1");
     let resolveStatus!: (value: { is_processing: boolean }) => void;
