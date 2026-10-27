@@ -1,12 +1,12 @@
 """Project message content and detach SDK state for response persistence."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from onyx.agents.models import AgentInfo, RunState, StepRecord, ToolExecutionRecord
 from onyx.chat.response_models import ResponseRecord
-from onyx.context.search.models import SearchDocsResponse
+from onyx.context.search.models import SearchDoc, SearchDocsResponse
 from onyx.deep_research.models import ResearchConfiguration
 from onyx.llm.models import (
     AssistantMessage,
@@ -128,6 +128,29 @@ def response_snapshot(record: ResponseRecord) -> RunState:
         if record.checkpoint
         else None,
     )
+
+
+def restore_search_documents(
+    messages: list[Message], documents: Mapping[str, SearchDoc]
+) -> None:
+    """Attach sources to an owned history list without changing its borrowed messages."""
+    for index, message in enumerate(messages):
+        if not isinstance(message, ToolResultMessage) or not isinstance(
+            message.details, SearchDocsResponse
+        ):
+            continue
+        details = message.details.model_copy(
+            update={
+                "search_docs": [
+                    documents[document_id]
+                    for document_id in dict.fromkeys(
+                        message.details.citation_mapping.values()
+                    )
+                    if document_id in documents
+                ]
+            }
+        )
+        messages[index] = message.model_copy(update={"details": details})
 
 
 def _saved_message[T: Message](message: T) -> T:
