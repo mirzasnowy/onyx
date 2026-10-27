@@ -54,6 +54,48 @@ export class ApiService {
     return data.chat_session_id;
   }
 
+  async waitForSessionIdle(
+    sessionId: string,
+    signal: AbortSignal,
+    onUnconfirmed: () => void
+  ): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const response = await this.fetchWithRetry(
+          `${this.backendUrl}/chat/chat-session/${sessionId}/status`,
+          async () => ({ headers: await this.getHeaders(), signal })
+        );
+        if (!response.ok) throw new Error("Cannot confirm chat readiness");
+        const status: unknown = await response.json();
+        if (
+          typeof status !== "object" ||
+          status === null ||
+          !("is_processing" in status) ||
+          typeof status.is_processing !== "boolean"
+        ) {
+          throw new Error("Invalid chat readiness response");
+        }
+        if (!status.is_processing) return;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        onUnconfirmed();
+      }
+      if (signal.aborted) break;
+      await new Promise<void>((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, 1000);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+    throw new DOMException("Request cancelled", "AbortError");
+  }
+
   /**
    * Stream a message to the chat
    * Returns an async generator of packets

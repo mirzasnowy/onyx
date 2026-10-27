@@ -18,6 +18,7 @@ import {
   resumeChatMessage,
   StreamHttpError,
 } from "@/api/chat/stream";
+import { waitForSessionIdle } from "@/chat/sessionReadiness";
 import { processRawChatHistory } from "@/chat/chatHistory";
 import { FLUSH_INTERVAL_MS } from "@/chat/constants";
 import { BackendChatSession } from "@/chat/interfaces";
@@ -48,6 +49,7 @@ async function runResumeStream(
   const nodeId = node.nodeId;
   const controller = new AbortController();
   store.getState().setAbortController(sessionId, controller);
+  store.getState().setStreamId(sessionId, runId);
   store.getState().updateChatState(sessionId, "streaming");
   // clear the reserved placeholder so it doesn't render above the replayed stream. The timer
   // restarts from here: this client never saw the run's true start (web shows no timer at all here).
@@ -60,7 +62,8 @@ async function runResumeStream(
   // writes are safe only while this session stays focused and unaborted
   const stillCurrent = () =>
     store.getState().currentSessionId === sessionId &&
-    !controller.signal.aborted;
+    !controller.signal.aborted &&
+    store.getState().sessions.get(sessionId)?.abortController === controller;
 
   let pending: Packet[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -138,12 +141,18 @@ async function runResumeStream(
     if (flushTimer) clearTimeout(flushTimer);
     flush();
     resumingRuns.delete(runId);
-    store.getState().updateChatState(sessionId, "input");
+
     // Keep `controller` as an ownership token: a new send replaces it via setAbortController, so
     // stillOurs() tells this resume from a raced-in send (a finished send leaves null ≠ token).
     const stillOurs = () =>
       store.getState().sessions.get(sessionId)?.abortController === controller;
     const wasCurrent = store.getState().currentSessionId === sessionId;
+    if (!stillOurs()) return;
+    store.getState().updateChatState(sessionId, "settling");
+    const idle = await waitForSessionIdle(sessionId, stillOurs, () => {
+      store.getState().updateChatState(sessionId, "unconfirmed");
+    });
+    if (!idle || !stillOurs()) return;
 
     if (wasCurrent && stillOurs()) {
       // settle from the persisted session, but only while we still own the stream — else a
@@ -151,12 +160,19 @@ async function runResumeStream(
       try {
         const settled = await getChatSession(sessionId);
         if (stillOurs() && store.getState().currentSessionId === sessionId) {
-          store
-            .getState()
-            .hydrateSession(
-              sessionId,
-              processRawChatHistory(settled.messages, settled.packets),
-            );
+          const hasLocalError = [
+            ...(store
+              .getState()
+              .sessions.get(sessionId)
+              ?.messageTree.values() ?? []),
+          ].some((message) => message.type === "error");
+          if (!hasLocalError)
+            store
+              .getState()
+              .hydrateSession(
+                sessionId,
+                processRawChatHistory(settled.messages, settled.packets),
+              );
           // clear the stale current_stream so a remount can't re-resume this finished run
           queryClient.setQueryData(
             QUERY_KEYS.chatSession(serverUrl, sessionId),
@@ -168,6 +184,7 @@ async function runResumeStream(
       }
     }
     if (stillOurs()) {
+      store.getState().updateChatState(sessionId, "input");
       store.getState().setAbortController(sessionId, null);
     }
     if (wasCurrent) {

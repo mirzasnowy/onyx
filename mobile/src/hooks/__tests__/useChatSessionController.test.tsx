@@ -43,6 +43,7 @@ jest.mock("@/api/chat/stream", () => ({
 }));
 jest.mock("@/api/chat/sessions", () => ({
   getChatSession: jest.fn(),
+  getChatSessionStatus: jest.fn(async () => ({ is_processing: false })),
 }));
 
 const resumeMock = resumeChatMessage as unknown as Mock<

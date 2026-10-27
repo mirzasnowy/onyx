@@ -8,6 +8,7 @@ import { QUERY_KEYS } from "@/api/query-keys";
 import {
   createChatSession,
   getChatSession,
+  getChatSessionStatus,
   renameChatSession,
   stopChatSession,
 } from "@/api/chat/sessions";
@@ -19,6 +20,7 @@ import {
   SendMessageBody,
   streamChatMessage,
 } from "@/api/chat/stream";
+import { waitForSessionIdle } from "@/chat/sessionReadiness";
 import { DEFAULT_AGENT_ID } from "@/chat/agents";
 import { FLUSH_INTERVAL_MS } from "@/chat/constants";
 import { processRawChatHistory } from "@/chat/chatHistory";
@@ -78,10 +80,14 @@ async function runChatStream(
   userNodeId: number,
   agentNodeId: number,
   body: SendMessageBody,
-  signal: AbortSignal,
+  controller: AbortController,
   autoName: AutoNameContext | null,
+  onAccepted?: () => void,
 ): Promise<void> {
   const store = useChatSessionStore;
+  const signal = controller.signal;
+  const stillOurs = () =>
+    store.getState().sessions.get(sessionId)?.abortController === controller;
   let pending: Packet[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let sawStreaming = false;
@@ -94,7 +100,7 @@ async function runChatStream(
     .patchNode(sessionId, agentNodeId, { streamingStartedAt: Date.now() });
 
   function flush() {
-    if (pending.length === 0) return;
+    if (!stillOurs() || pending.length === 0) return;
     const data = store.getState().sessions.get(sessionId);
     const node = data?.messageTree.get(agentNodeId);
     if (!data || !node) {
@@ -121,8 +127,10 @@ async function runChatStream(
 
   try {
     for await (const event of streamChatMessage(body, signal)) {
-      if (signal.aborted) break;
+      if (signal.aborted || !stillOurs()) break;
       if (isMessageIdInfo(event)) {
+        onAccepted?.();
+        onAccepted = undefined;
         if (event.user_message_id != null) {
           store.getState().patchNode(sessionId, userNodeId, {
             messageId: event.user_message_id,
@@ -131,6 +139,16 @@ async function runChatStream(
         store.getState().patchNode(sessionId, agentNodeId, {
           messageId: event.reserved_assistant_message_id,
         });
+        store
+          .getState()
+          .setStreamId(sessionId, event.reserved_assistant_message_id);
+        if (store.getState().sessions.get(sessionId)?.stopRequested) {
+          void stopChatSession(
+            sessionId,
+            event.reserved_assistant_message_id,
+          ).catch(() => {});
+          controller.abort();
+        }
         continue;
       }
       if (isStreamError(event)) {
@@ -164,7 +182,7 @@ async function runChatStream(
     }
   } catch (error) {
     // Abort is the normal stop path; any other failure marks the assistant node errored.
-    if (!signal.aborted) {
+    if (!signal.aborted && stillOurs()) {
       hadError = true;
       const message =
         error instanceof Error ? error.message : "Something went wrong.";
@@ -176,9 +194,15 @@ async function runChatStream(
   } finally {
     if (flushTimer) clearTimeout(flushTimer);
     flush();
-    if (signal.aborted && !hadError) {
+    if (stillOurs() && signal.aborted && !hadError) {
       appendUserCancelledStop(sessionId, agentNodeId);
     }
+    if (!stillOurs()) return;
+    store.getState().updateChatState(sessionId, "settling");
+    const idle = await waitForSessionIdle(sessionId, stillOurs, () => {
+      store.getState().updateChatState(sessionId, "unconfirmed");
+    });
+    if (!idle || !stillOurs()) return;
     store.getState().updateChatState(sessionId, "input");
     store.getState().setAbortController(sessionId, null);
     // name a new session once it streamed output; skip stop/abort and thrown transport failures
@@ -191,8 +215,7 @@ async function runChatStream(
 export interface ChatController {
   messages: ReturnType<typeof getLatestMessageChain>;
   chatState: ChatState;
-  // `onAccepted` fires once, past every early return and before the session-create await, so the
-  // caller can clear the draft optimistically yet only on a committed send.
+  // Clear the draft only after the server acknowledges the request.
   // `toolOptions` carries the toolbar controls (deep research / forced + allowed tools / sources);
   // absent = backend defaults.
   submit: (
@@ -274,6 +297,18 @@ export function useChatController(
         if (activeId != null) {
           const current = useChatSessionStore.getState().sessions.get(activeId);
           if (current && current.chatState !== "input") return; // a run is already active
+          try {
+            if ((await getChatSessionStatus(activeId)).is_processing !== false)
+              return;
+          } catch {
+            // Keep the draft until server readiness can be confirmed.
+            return;
+          }
+          if (
+            useChatSessionStore.getState().sessions.get(activeId)
+              ?.abortController
+          )
+            return;
         }
         if (activeId == null) {
           activeId = await createChatSession(personaId, projectId);
@@ -287,10 +322,6 @@ export function useChatController(
             });
           }
         }
-        // Committed: the session exists and the rest of this path is synchronous → clear the draft.
-        // A failed createChatSession above throws first, so the draft (text + file refs) survives.
-        onAccepted?.();
-
         const store = useChatSessionStore.getState();
         store.ensureSession(activeId);
         // Re-read: the captured store.sessions snapshot predates ensureSession.
@@ -353,8 +384,9 @@ export function useChatController(
           initialUserNode.nodeId,
           initialAgentNode.nodeId,
           body,
-          controller.signal,
+          controller,
           isNewSession ? { serverUrl, queryClient } : null,
+          onAccepted,
         );
       } finally {
         submittingRef.current = false;
@@ -366,13 +398,14 @@ export function useChatController(
   const stop = useCallback(() => {
     if (sessionId == null) return;
     const store = useChatSessionStore.getState();
-    const tree = store.sessions.get(sessionId)?.messageTree;
-    const last = tree ? getLatestMessageChain(tree).at(-1) : undefined;
-    // the reserved assistant ID is the stream ID; unknown before the ID packet arrives
-    const streamId = last?.type === "assistant" ? last.messageId : undefined;
-    store.abortSession(sessionId);
-    // client abort alone leaves the backend generating
-    void stopChatSession(sessionId, streamId).catch(() => {});
+    const current = store.sessions.get(sessionId);
+    if (!current?.abortController) return;
+    store.requestStop(sessionId);
+    // Keep reading until acknowledgement, so Stop cannot target a later request.
+    if (current.streamId !== null) {
+      void stopChatSession(sessionId, current.streamId).catch(() => {});
+      current.abortController.abort();
+    }
   }, [sessionId]);
 
   return {
