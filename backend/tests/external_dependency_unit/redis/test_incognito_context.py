@@ -18,10 +18,16 @@ from uuid import UUID, uuid4
 import pytest
 from redis.lock import Lock as RedisLock
 
-from onyx.agents.models import ExecutionStatus, RunStatus, StepRecord
+from onyx.agents.models import (
+    ExecutionStatus,
+    RunStatus,
+    StepRecord,
+    ToolExecutionRecord,
+)
 from onyx.cache.factory import get_cache_backend
 from onyx.cache.interface import CacheBackendType
 from onyx.chat import incognito_context
+from onyx.chat.history_store import RedisChatHistoryStore
 from onyx.chat.incognito_context import (
     _PENDING_TEARDOWNS_KEY,
     INCOGNITO_CONTEXT_TTL_SECONDS,
@@ -41,9 +47,10 @@ from onyx.chat.models import (
     PromptMetadata,
 )
 from onyx.chat.prompt_formatting import prompt_metadata
-from onyx.chat.response_models import ResponseRecord
+from onyx.chat.response_models import ChatResponseSnapshot, ResponseRecord
 from onyx.chat.stream_buffer import _chunk_key
-from onyx.configs.constants import MessageType
+from onyx.configs.constants import DocumentSource, MessageType
+from onyx.context.search.models import SearchDoc, SearchDocsResponse
 from onyx.file_store.models import ChatFileType, ChatLoadedFile
 from onyx.llm.models import (
     AssistantMessage,
@@ -54,6 +61,7 @@ from onyx.llm.models import (
 )
 from onyx.llm.models import ToolCall as AgentToolCall
 from onyx.redis.redis_pool import get_raw_redis_client, get_redis_client
+from onyx.tools.results import ResearchAgentCallResult
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 
 
@@ -676,3 +684,90 @@ def test_postgres_rejection_happens_before_cache_access() -> None:
             _save(uuid4(), [_message("must not reach SQL")])
         retry_incognito_teardowns()
         factory.assert_not_called()
+
+
+@pytest.mark.parametrize("is_research", [False, True])
+def test_root_sources_survive_temporary_response_round_trip(is_research: bool) -> None:
+    session_id = uuid4()
+    assert _save(session_id, [UserMessage(content="Find evidence")])
+    document = SearchDoc(
+        document_id="source",
+        chunk_ind=0,
+        semantic_identifier="Reference",
+        link="https://example.com/reference",
+        blurb="Evidence",
+        source_type=DocumentSource.WEB,
+        boost=0,
+        hidden=False,
+        metadata={},
+        match_highlights=[],
+    )
+    result = ToolResultMessage(
+        tool_call_id="call",
+        tool_name="research_agent" if is_research else "web_search",
+        content="Evidence [4]",
+        details=(
+            ResearchAgentCallResult(
+                intermediate_report="Evidence [4]", citation_mapping={4: document}
+            )
+            if is_research
+            else SearchDocsResponse(search_docs=[], citation_mapping={4: "source"})
+        ),
+    )
+    record = ResponseRecord(
+        run_id="17",
+        agent_id=str(session_id),
+        status=RunStatus.COMPLETE,
+        steps=[
+            StepRecord(
+                message=AssistantMessage(
+                    content=[
+                        AgentToolCall(id="call", name=result.tool_name, arguments={})
+                    ]
+                ),
+                generation_status=ExecutionStatus.COMPLETE,
+                tools={
+                    "call": ToolExecutionRecord(
+                        status=ExecutionStatus.COMPLETE, result=result
+                    )
+                },
+            )
+        ],
+    )
+    snapshot = ChatResponseSnapshot(
+        answer="Evidence [4]",
+        reasoning=None,
+        request_params=None,
+        citation_to_doc={4: document},
+        tool_calls=[],
+        is_clarification=False,
+        all_search_docs={"source": document},
+        pre_answer_processing_time=None,
+        response=record,
+        cancelled=False,
+    )
+    store = RedisChatHistoryStore(
+        message_id=17, chat_session_id=session_id, visible_message_ids=()
+    )
+    with patch(
+        "onyx.chat.history_store.save_chat_response_to_db", return_value="Evidence [4]"
+    ):
+        store.save_response(snapshot)
+        store.save_response(snapshot)
+    messages, previous_id = store.prepare_messages(
+        [UserMessage(content="Explain it")], None, "Explain it"
+    )
+    assert previous_id == "17"
+    restored = messages[-2]
+    assert isinstance(restored, ToolResultMessage)
+    if is_research:
+        assert isinstance(restored.details, ResearchAgentCallResult)
+        assert restored.details.citation_mapping == {4: document}
+    else:
+        assert isinstance(restored.details, SearchDocsResponse)
+        assert restored.details.search_docs == [document]
+        assert restored.details.citation_mapping == {4: "source"}
+        assert isinstance(result.details, SearchDocsResponse)
+        assert result.details.search_docs == []
+    restored.content = "changed locally"
+    assert load_incognito_context(session_id).messages[-1].content == "Evidence [4]"
