@@ -2,7 +2,9 @@ import datetime
 import json
 import time
 from collections.abc import Generator
+from concurrent.futures import Future
 from datetime import timedelta
+from typing import cast
 from uuid import UUID
 
 from fastapi import (
@@ -26,20 +28,21 @@ from onyx.auth.users import current_chat_accessible_user
 from onyx.background.task_utils import enqueue_user_file_deletes
 from onyx.cache.factory import get_cache_backend
 from onyx.chat.chat_processing_checker import (
+    ADMISSION_CACHE_TIMEOUT_S,
     get_processing_stream_id,
     is_chat_session_processing,
 )
-from onyx.chat.chat_state import ChatStateContainer
 from onyx.chat.chat_utils import (
     convert_chat_history_basic,
     create_chat_session_from_request,
 )
+from onyx.chat.execution import ActiveChatTurns
 from onyx.chat.incognito import (
     delete_incognito_generated_files,
     incognito_allowed_for_user,
 )
 from onyx.chat.incognito_context import teardown_incognito_session
-from onyx.chat.models import ChatFullResponse, CreateChatSessionID
+from onyx.chat.models import ChatFullResponse, ChatResponseOutcome, CreateChatSessionID
 from onyx.chat.process_message import (
     gather_stream_full,
     handle_multi_model_stream,
@@ -434,7 +437,7 @@ def get_chat_session(
     current_stream: CurrentStreamInfo | None = None
     is_processing = True
     try:
-        cache = get_cache_backend()
+        cache = get_cache_backend(operation_timeout_s=ADMISSION_CACHE_TIMEOUT_S)
         is_processing = is_chat_session_processing(session_id, cache)
         stream_id = get_processing_stream_id(session_id, cache)
         if stream_id is not None:
@@ -826,6 +829,8 @@ def handle_send_chat_message(
     Returns:
         StreamingResponse | ChatFullResponse: Either streams or returns complete response.
     """
+    # Starlette's application state has no typed attribute interface.
+    active_chat_turns = cast(ActiveChatTurns, request.app.state.active_chat_turns)
     # Session id only: the session's incognito mode isn't loaded yet, and a
     # verbatim prompt in the debug log would be exactly the durable message
     # log incognito must never leave behind.
@@ -857,6 +862,7 @@ def handle_send_chat_message(
         def multi_model_stream_generator() -> Generator[str, None, None]:
             try:
                 for obj in handle_multi_model_stream(
+                    active_chat_turns=active_chat_turns,
                     new_msg_req=chat_message_req,
                     user=user,
                     llm_overrides=llm_overrides,
@@ -900,8 +906,9 @@ def handle_send_chat_message(
                 )
                 usage_db_session.commit()
 
-        state_container = ChatStateContainer()
+        response_future = Future[ChatResponseOutcome]()
         packets = handle_stream_message_objects(
+            active_chat_turns=active_chat_turns,
             new_msg_req=chat_message_req,
             user=user,
             litellm_additional_headers=get_relevant_headers(
@@ -912,9 +919,9 @@ def handle_send_chat_message(
             ),
             mcp_headers=chat_message_req.mcp_headers,
             additional_context=chat_message_req.additional_context,
-            external_state_container=state_container,
+            response_future=response_future,
         )
-        result = gather_stream_full(packets, state_container)
+        result = gather_stream_full(packets, response_future)
         # CreateChatSessionID is only yielded for newly-created sessions, so for
         # follow-up messages on an existing session the aggregated response would
         # otherwise omit chat_session_id. Backfill it from the request so the
@@ -928,9 +935,10 @@ def handle_send_chat_message(
 
     # Streaming path, normal Onyx UI behavior
     def stream_generator() -> Generator[str, None, None]:
-        state_container = ChatStateContainer()
+        response_future = Future[ChatResponseOutcome]()
         try:
             for obj in handle_stream_message_objects(
+                active_chat_turns=active_chat_turns,
                 new_msg_req=chat_message_req,
                 user=user,
                 litellm_additional_headers=get_relevant_headers(
@@ -941,7 +949,7 @@ def handle_send_chat_message(
                 ),
                 mcp_headers=chat_message_req.mcp_headers,
                 additional_context=chat_message_req.additional_context,
-                external_state_container=state_container,
+                response_future=response_future,
             ):
                 yield get_json_line(obj.model_dump())
 
@@ -1328,8 +1336,8 @@ def resume_chat_stream(
         require_permission(Permission.READ_CHAT, allow_anonymous=True)
     ),
 ) -> StreamingResponse:
-    """Replay an in-flight run's buffered stream from ``cursor`` and tail it
-    live until the run completes. Serves any pod: the buffer lives in the
+    """Replay buffered output from ``cursor`` and tail it while its worker is live.
+    Serves any pod: the buffer lives in the
     shared cache. 404 when the session has no resumable run — the client
     falls back to refetching the session."""
     # Short-lived session: a Depends(get_session) would stay checked out (idle

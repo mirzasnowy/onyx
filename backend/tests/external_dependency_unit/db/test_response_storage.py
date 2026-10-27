@@ -26,7 +26,7 @@ from onyx.agents.models import (
     ToolExecutionRecord,
     messages_from_steps,
 )
-from onyx.chat.chat_state import ChatStateContainer
+from onyx.chat.chat_utils import capture_chat_history
 from onyx.chat.presentation import project_response, replay_response
 from onyx.chat.response import response_snapshot
 from onyx.chat.response_models import (
@@ -36,7 +36,6 @@ from onyx.chat.response_models import (
     MessageRendering,
     ResponseRecord,
 )
-from onyx.chat.save_chat import save_chat_turn as save_legacy_chat_turn
 from onyx.configs.constants import DocumentSource, MessageType
 from onyx.context.search.models import SavedSearchDoc, SearchDoc, SearchDocsResponse
 from onyx.db import chat_subagents
@@ -50,6 +49,7 @@ from onyx.db.chat import (
     root_response_id,
     visible_message_ids,
 )
+from onyx.db.chat_display import save_chat_display__no_commit
 from onyx.db.chat_response import (
     read_chat_execution,
     read_response_replay_data,
@@ -90,13 +90,14 @@ from onyx.llm.models import (
     ToolResultMessage,
     UserMessage,
 )
+from onyx.natural_language_processing.utils import get_tokenizer
+from onyx.prompts.chat_prompts import TOOL_CALL_RESPONSE_CROSS_MESSAGE
 from onyx.server.query_and_chat.streaming_models import (
     AgentResponseDelta,
     CitationInfo,
     MemoryToolDelta,
     SearchToolDocumentsDelta,
 )
-from onyx.tools.records import ToolCallInfo
 from onyx.tools.results import (
     CodingAgentCallResult,
     CustomToolCallSummary,
@@ -394,7 +395,7 @@ def test_tool_result_details_round_trip_without_legacy_output(
         )
     )
     assert tool is not None
-    assert tool.tool_call_response == ""
+    assert tool.legacy_response == ""
     assert tool.result is not None
     assert tool.result.content == result.content
     assert tool.generated_images is None
@@ -616,7 +617,7 @@ def test_response_items_preserve_order_provider_metadata_and_tool_identity(
         "First result",
         "Second result",
     }
-    assert all(tool.tool_call_response == "" for tool in tools)
+    assert all(tool.legacy_response == "" for tool in tools)
     assert len(response.response_items) == 3
     assert [message.id for message in restored.messages] == [
         message.id for message in record.messages
@@ -1572,31 +1573,28 @@ def test_response_store_rejects_wrong_session_or_recording_mode_before_writes(
     assert not row.response_items
 
 
-def test_legacy_writer_keeps_tool_results_and_display_text(
+def test_legacy_rows_keep_tool_results_and_display_text(
     db_session: Session, conversation: ChatSession, tool_record: Tool
 ) -> None:
     response = _response(db_session, conversation)
-    save_legacy_chat_turn(
-        message_text="Existing answer",
-        reasoning_tokens="Existing thinking",
-        tool_calls=[
-            ToolCallInfo(
-                parent_tool_call_id=None,
-                turn_index=0,
-                tab_index=0,
-                tool_name="lookup",
-                tool_call_id="legacy-call",
-                tool_id=tool_record.id,
-                reasoning_tokens="Tool thinking",
-                tool_call_arguments={"query": "cedar"},
-                tool_call_response="Existing result",
-            )
-        ],
-        citation_to_doc={},
-        all_search_docs={},
-        db_session=db_session,
-        assistant_message=response,
+    response.message = "Existing answer"
+    response.reasoning_tokens = "Existing thinking"
+    db_session.add(
+        StoredToolCall(
+            chat_session_id=conversation.id,
+            parent_chat_message_id=response.id,
+            turn_number=0,
+            tab_index=0,
+            tool_id=tool_record.id,
+            tool_call_id="legacy-call",
+            reasoning_tokens="Tool thinking",
+            tool_call_arguments={"query": "cedar"},
+            legacy_response="Existing result",
+            tool_call_tokens=1,
+            result=None,
+        )
     )
+    db_session.commit()
     db_session.expire_all()
     saved = db_session.get(ChatMessage, response.id)
     assert saved is not None
@@ -1615,9 +1613,7 @@ def test_legacy_writer_keeps_tool_results_and_display_text(
     assert tool.result is None
     assert (
         db_session.scalar(
-            select(StoredToolCall.tool_call_response).where(
-                StoredToolCall.id == tool.id
-            )
+            select(StoredToolCall.legacy_response).where(StoredToolCall.id == tool.id)
         )
         == "Existing result"
     )
@@ -1838,7 +1834,7 @@ def test_content_free_sessions_reject_incremental_content_writes(
     assert db_session.get(ChatSession, child_id) is None
 
 
-def test_legacy_save_preserves_distinct_document_version_keys(
+def test_display_save_preserves_distinct_document_version_keys(
     db_session: Session, conversation: ChatSession
 ) -> None:
     response = _response(db_session, conversation)
@@ -1856,18 +1852,23 @@ def test_legacy_save_preserves_distinct_document_version_keys(
         )
         for index in range(2)
     ]
-    save_legacy_chat_turn(
+    save_chat_display__no_commit(
         message_text="Answer",
         reasoning_tokens=None,
         tool_calls=[],
         citation_to_doc={},
-        all_search_docs={
-            ChatStateContainer.create_search_doc_key(doc, use_simple_key=False): doc
-            for doc in documents
-        },
+        all_search_docs={(doc.document_id, doc.chunk_ind): doc for doc in documents},
         db_session=db_session,
         assistant_message=response,
+        document_key=lambda doc: (doc.document_id, doc.chunk_ind),
+        tokenizer=get_tokenizer(None, None),
+        is_clarification=False,
+        emitted_citations=None,
+        pre_answer_processing_time=None,
+        persist_content=True,
+        request_params=None,
     )
+    db_session.commit()
     db_session.expire_all()
     assert {
         (doc.chunk_ind, tuple(doc.match_highlights or []))
@@ -2076,6 +2077,68 @@ def test_root_history_and_metadata_do_not_consume_child_history_limit(
     assert [
         agent.id for agent in load_session_agent_metadata(latest.id, include_root=False)
     ] == [str(child_id)]
+
+
+def test_mixed_legacy_and_canonical_history_preserves_each_saved_format(
+    db_session: Session, conversation: ChatSession, tool_record: Tool
+) -> None:
+    legacy = _response(db_session, conversation, text="Old question")
+    legacy.message = "Old answer"
+    legacy_call = StoredToolCall(
+        chat_session_id=conversation.id,
+        parent_chat_message_id=legacy.id,
+        turn_number=0,
+        tab_index=0,
+        tool_id=tool_record.id,
+        tool_call_id="old-call",
+        tool_call_arguments={"query": "old"},
+        legacy_response="Old actual tool output",
+        tool_call_tokens=1,
+        result=None,
+    )
+    db_session.add(legacy_call)
+    current = _response(db_session, conversation, text="New question", previous=legacy)
+    record = _record(current, "New answer")
+    record.steps = _steps(
+        record.run_id,
+        [
+            AssistantMessage(
+                content=[ToolCall(id="new-call", name="lookup", arguments={})]
+            ),
+            ToolResultMessage(
+                tool_call_id="new-call",
+                tool_name="lookup",
+                content="New actual tool output",
+            ),
+            AssistantMessage(content=[TextContent(text="New answer")]),
+        ],
+    )
+    record.answer_step_index = 1
+    _save(db_session, current, record)
+    db_session.commit()
+    db_session.expire_all()
+
+    history = capture_chat_history([legacy, current], {tool_record.id: "lookup"}, len)
+    old_results = [
+        m for m in history[0].response_messages if isinstance(m, ToolResultMessage)
+    ]
+    new_results = [
+        m for m in history[1].response_messages if isinstance(m, ToolResultMessage)
+    ]
+    assert [m.text for m in old_results] == [TOOL_CALL_RESPONSE_CROSS_MESSAGE]
+    assert [m.text for m in new_results] == ["New actual tool output"]
+    assert legacy_call.result is None
+    assert legacy_call.tool_call_response == "Old actual tool output"
+    assert (
+        db_session.scalar(
+            select(StoredToolCall.legacy_response).where(
+                StoredToolCall.id == legacy_call.id
+            )
+        )
+        == "Old actual tool output"
+    )
+    assert not legacy.response_items
+    assert current.response_items
 
 
 def test_replay_sources_include_tool_documents_and_preserve_root_versions(

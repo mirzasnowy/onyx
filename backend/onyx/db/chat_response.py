@@ -858,7 +858,7 @@ def write_response_items(
                 tool_call_id=stored_call_id,
                 tool_call_arguments=arguments,
                 tool_call_tokens=count_tokens(json.dumps(arguments)),
-                tool_call_response="",
+                legacy_response="",
             )
             if tool.result is not None and (
                 execution is None or execution.result is None

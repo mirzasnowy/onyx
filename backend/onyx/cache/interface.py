@@ -109,6 +109,15 @@ class CacheBackend(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def delete_prefix(self, prefix: str) -> None:
+        """Delete tenant-local keys with this literal, nonempty prefix.
+
+        Concurrent writers can add keys during deletion. Callers must stop or
+        fence writers before using this operation for teardown.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def exists(self, key: str) -> bool:
         raise NotImplementedError
 

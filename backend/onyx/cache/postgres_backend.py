@@ -274,6 +274,20 @@ class PostgresCacheBackend(CacheBackend):
             session.execute(delete(CacheStore).where(CacheStore.key == key))
             session.commit()
 
+    def delete_prefix(self, prefix: str) -> None:
+        from onyx.db.engine.sql_engine import get_session_with_tenant
+
+        if not prefix:
+            raise ValueError("Cache deletion requires a nonempty prefix")
+        with get_session_with_tenant(tenant_id=self._tenant_id) as session:
+            _set_statement_timeout(session, self._statement_timeout_ms)
+            session.execute(
+                delete(CacheStore).where(
+                    CacheStore.key.startswith(prefix, autoescape=True)
+                )
+            )
+            session.commit()
+
     def exists(self, key: str) -> bool:
         from onyx.db.engine.sql_engine import get_session_with_tenant
 

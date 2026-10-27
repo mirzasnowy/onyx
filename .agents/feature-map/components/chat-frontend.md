@@ -605,3 +605,14 @@ Multi-model panels own their response errors. A model display name alone does no
 Global banners show session and request failures that do not belong to a response.
 History loading converts API `error_info` or the legacy `error` string into `errorMessage`.
 Renderers use `errorMessage` for failures and `message` for answer text.
+### Timeline classification after diagnostic packets
+
+`timeline/hooks/packetProcessor.ts` classifies each group when its first tool or display
+packet arrives. Debug and control packets can precede that event without hiding the group.
+The classification then stays fixed for mixed groups. `useTimelineHeader` uses the first
+rendered packet to choose the activity label, so leading debug packets cannot hide a tool name.
+
+
+Timeline groups use their first rendered packet for classification and header text.
+Debug and heartbeat packets can arrive first without hiding later tool output.
+Once classified, a mixed group keeps its original tool or display category.

@@ -299,3 +299,9 @@ class ResponseCheckpoint(BaseModel):
 class SavedCheckpoint(BaseModel):
     ownership_version: int
     data: ResponseCheckpoint
+
+
+class ResponseOwner(BaseModel):
+    token: UUID
+    root_message_id: int
+    ownership_version: int | None = None

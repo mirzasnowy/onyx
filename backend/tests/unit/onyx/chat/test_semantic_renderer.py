@@ -1,7 +1,6 @@
 """The packet view cannot drive model requests or tool execution."""
 
 from collections.abc import Mapping
-from queue import Queue
 
 import pytest
 from pydantic import BaseModel, JsonValue
@@ -104,24 +103,8 @@ from onyx.tracing.flows import LLMFlow
 from tests.unit.onyx.agents.fakes import FakeModelClient, run_agent
 
 
-class _PacketQueue(Queue[tuple[int, Packet | Exception | object]]):
-    def __init__(self, packets: list[Packet]) -> None:
-        super().__init__()
-        self.packets = packets
-
-    def put(
-        self,
-        item: tuple[int, Packet | Exception | object],
-        block: bool = True,
-        timeout: float | None = None,
-    ) -> None:
-        del block, timeout
-        assert isinstance(item[1], Packet)
-        self.packets.append(item[1])
-
-
 def _emitter(packets: list[Packet]) -> Emitter:
-    return Emitter(_PacketQueue(packets))
+    return Emitter(packets.append)
 
 
 class _Execution(BaseModel):
@@ -172,7 +155,7 @@ def test_rendering_does_not_change_requests_transcript_or_execution() -> None:
         )
         listener = None
         if render:
-            presentation = ResponsePresenter(Emitter(Queue()))
+            presentation = ResponsePresenter(Emitter(lambda _packet: None))
             listener = presentation.consume
         run_agent(
             agent,

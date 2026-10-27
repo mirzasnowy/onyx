@@ -1,24 +1,54 @@
 from collections.abc import Iterator
-from typing import Any
+from enum import Enum
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+)
 
-from onyx.agents.models import CompactionMetadata
+from onyx.agents.models import (
+    CompactionCheckpoint,
+    CompactionMetadata,
+)
+from onyx.cache.interface import CacheBackend
+from onyx.chat.chat_processing_checker import ChatTurnAdmission
+from onyx.chat.response_models import ChatResponseSnapshot
 from onyx.configs.constants import MessageType
+from onyx.context.models import UserMemoryContext
 from onyx.context.search.models import SearchDoc
+from onyx.db.enums import IncognitoRecordMode
 from onyx.file_store.models import (
     ChatLoadedFile,
+    ExtractedContextFiles,
+    FileDescriptor,
     FileToolMetadata,
 )
+from onyx.llm.interfaces import LLM, LLMUserIdentity
+from onyx.llm.models import (
+    Message,
+    ReasoningEffort,
+)
+from onyx.onyxbot.slack.models import SlackContext
 from onyx.server.query_and_chat.models import (
     MessageResponseIDInfo,
     MultiModelMessageResponseIDInfo,
+    SendMessageRequest,
 )
-from onyx.server.query_and_chat.streaming_models import CitationInfo, Packet
-from onyx.tools.models import SearchToolUsage, ToolCallKickoff
+from onyx.server.query_and_chat.streaming_models import (
+    CitationInfo,
+    Packet,
+)
+from onyx.tools.file_snapshot import SavedChatFile, SavedContextFiles
+from onyx.tools.models import ChatFile, PersonaToolConfiguration, SearchToolUsage
 from onyx.tools.results import GeneratedImage
 from onyx.tools.tool_implementations.custom.base_tool_types import ToolResultType
+from onyx.tools.tool_implementations.search.models import SearchToolState
+
+MAX_DISCOVERED_AGENTS = 128
 
 
 class PromptMetadata(CompactionMetadata):
@@ -31,11 +61,22 @@ class PromptMetadata(CompactionMetadata):
     omit_tool_result_content: bool = False
 
 
-class HistoryImageReplay(BaseModel):
-    supports_image_input: bool
-    image_cap: int | None = None
-    keep_image_indices: set[tuple[int, int]] | None = None
-    dropped_image_count: int = 0
+class FileContextResult(BaseModel):
+    """Result of building a file's LLM context representation."""
+
+    message: Message
+    tool_metadata: FileToolMetadata
+
+
+class ChatHistoryMessage(BaseModel):
+    id: int
+    message_type: MessageType
+    message: str
+    token_count: int
+    files: list[FileDescriptor]
+    is_clarification: bool
+    response_messages: list[Message]
+    checkpoint: CompactionCheckpoint | None = None
 
 
 class StreamingError(BaseModel):
@@ -120,44 +161,6 @@ class ChatFullResponse(BaseModel):
     error_msg: str | None = None
 
 
-class ToolCallSimple(BaseModel):
-    """Tool call for ChatMessageSimple representation (mirrors OpenAI format).
-
-    Used when an ASSISTANT message contains one or more tool calls.
-    Each tool call has an ID, name, arguments, and token count for tracking.
-    """
-
-    tool_call_id: str
-    tool_name: str
-    tool_arguments: dict[str, Any]
-    token_count: int = 0
-
-
-class ChatMessageSimple(BaseModel):
-    message: str
-    token_count: int
-    message_type: MessageType
-    # Only for USER type messages
-    image_files: list[ChatLoadedFile] | None = None
-    # Portion of token_count contributed by image_files. Kept separate so
-    # budgeting can discount it when a non-vision model replays the images
-    # as text markers instead.
-    image_token_count: int = 0
-    # Only for TOOL_CALL_RESPONSE type messages
-    tool_call_id: str | None = None
-    # For ASSISTANT messages with tool calls (OpenAI parallel tool calling format)
-    tool_calls: list[ToolCallSimple] | None = None
-    # The last message for which this is true
-    # AND is true for all previous messages
-    # (counting from the start of the history)
-    # represents the end of the cacheable prefix
-    # used for prompt caching
-    should_cache: bool = False
-    # When this message represents an injected text file, this is the file's ID.
-    # Used to detect which file messages survive context-window truncation.
-    file_id: str | None = None
-
-
 class ChatHistoryResult(BaseModel):
     """Result of converting chat history to simple format.
 
@@ -168,8 +171,13 @@ class ChatHistoryResult(BaseModel):
     FileReaderTool.
     """
 
-    simple_messages: list[ChatMessageSimple]
+    messages: list[Message]
     all_injected_file_metadata: dict[str, FileToolMetadata]
+
+
+class PreparedHistory(BaseModel):
+    history: ChatHistoryResult
+    files: list[ChatFile]
 
 
 class SearchParams(BaseModel):
@@ -180,17 +188,38 @@ class SearchParams(BaseModel):
     search_usage: SearchToolUsage
 
 
-class LlmStepResult(BaseModel):
-    reasoning: str | None
-    answer: str | None
-    tool_calls: list[ToolCallKickoff] | None
-    # Raw LLM text before any display-oriented filtering/sanitization.
-    # Used for fallback tool-call extraction when providers emit calls as text.
-    raw_answer: str | None = None
-    # Terminal finish_reason from the stream, LiteLLM-normalized (e.g. "stop",
-    # "length", "tool_calls", "content_filter"). Lets downstream classification
-    # distinguish a model refusal from a genuinely empty provider response.
-    finish_reason: str | None = None
+class PersistenceStatus(str, Enum):
+    SAVED = "saved"
+    FAILED = "failed"
+    UNCONFIRMED = "unconfirmed"
+
+
+PERSISTENCE_ERROR_MESSAGES = {
+    PersistenceStatus.FAILED: "The response could not be saved. Please try again.",
+    PersistenceStatus.UNCONFIRMED: "The response save has not completed. Reload this conversation.",
+}
+
+
+class PendingChatResponseSave(BaseModel):
+    response: ChatResponseSnapshot
+    deadline: float
+
+
+class ChatResponseOutcome(BaseModel):
+    """Frozen execution output and the application's persistence outcome."""
+
+    model_config = ConfigDict(frozen=True)
+
+    response: ChatResponseSnapshot
+    persistence_status: PersistenceStatus
+
+    @property
+    def error(self) -> str | None:
+        errors = [
+            self.response.error,
+            PERSISTENCE_ERROR_MESSAGES.get(self.persistence_status),
+        ]
+        return "\n".join(error for error in errors if error) or None
 
 
 class AvailableFiles(BaseModel):
@@ -202,8 +231,127 @@ class AvailableFiles(BaseModel):
     chat_file_ids: list[UUID] = []
 
 
-class FileContextResult(BaseModel):
-    """Result of building a file's LLM context representation."""
+class ChatReminderContext(BaseModel):
+    ran_image_gen: bool
+    has_open_url_tool: bool
+    out_of_cycles: bool
+    persona_task_prompt: str | None
+    has_context_documents: bool
 
-    message: ChatMessageSimple
-    tool_metadata: FileToolMetadata
+
+class ContextDocument(BaseModel):
+    document: int
+    title: str | None = None
+    contents: str
+
+
+class ContextDocuments(BaseModel):
+    documents: list[ContextDocument] = Field(default_factory=list)
+
+
+class SearchPassage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
+    document: int
+    content: str
+
+
+class SearchPassages(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
+    results: list[SearchPassage]
+
+
+class ChatPrompt(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    system_prompt: Message | None
+    user_info_prompt: Message | None = None
+    custom_prompt: Message | None
+    reminder: Message | None
+
+
+class PersonaPromptConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    system_prompt: str | None
+    task_prompt: str | None
+    datetime_aware: bool
+    replace_base_system_prompt: bool
+
+
+class ChatFeatureState(BaseModel):
+    """Chat settings and accumulated state needed to resume suspended execution."""
+
+    kind: Literal["chat.state.v1"] = "chat.state.v1"
+    persona: PersonaPromptConfig | None
+    context_files: SavedContextFiles
+    file_metadata: dict[str, FileToolMetadata] | None
+    memory: UserMemoryContext | None
+    reasoning_effort: ReasoningEffort
+    include_citations: bool
+    inject_memories: bool
+    forced_tool_id: int | None
+    base_prompt: str
+    custom_prompt: str | None
+    reminders_enabled: bool
+
+    elapsed_seconds: float
+    citation_sources: dict[int, SearchDoc]
+    citation_mapping: dict[int, str]
+    gathered_documents: list[SearchDoc]
+    chat_files: list[SavedChatFile]
+    has_called_search_tool: bool
+    ran_image_gen: bool
+    search_tools: dict[str, SearchToolState]
+
+
+class ReservedChatResponse(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    llm: LLM
+    message_id: int
+    display_name: str
+
+
+class ChatTurnSetup(BaseModel):
+    """Request values and service references shared by model executions."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    new_msg_req: SendMessageRequest
+    chat_session_id: UUID
+    chat_session_project_id: int | None
+    # The session's pinned recording policy. None is an ordinary chat.
+    incognito_record_mode: IncognitoRecordMode | None
+    persona_id: int
+    persona: PersonaPromptConfig
+    base_system_prompt: str
+    tool_configuration: PersonaToolConfiguration
+    research_tool_id: int | None
+    checkpoint: CompactionCheckpoint | None
+    user_message_id: int
+    user_identity: LLMUserIdentity
+    responses: list[ReservedChatResponse]
+    messages: list[Message]
+    input_messages: list[Message]
+    previous_run_id: str | None = None
+    extracted_context_files: ExtractedContextFiles
+    # Fences processing status and identifies the buffered stream.
+    stream_id: int
+    reasoning_effort: ReasoningEffort
+    search_params: SearchParams
+    all_injected_file_metadata: dict[str, FileToolMetadata]
+    available_files: AvailableFiles
+    forced_tool_id: int | None
+    chat_files_for_tools: list[ChatFile]
+    custom_agent_prompt: str | None
+    user_memory_context: UserMemoryContext
+    # For deep research: was the last assistant message a clarification request?
+    skip_clarification: bool
+    cache: CacheBackend
+    admission: ChatTurnAdmission
+    # Execution params forwarded to per-model tool construction
+    slack_context: SlackContext | None
+    litellm_additional_headers: dict[str, str] | None = None
+    custom_tool_additional_headers: dict[str, str] | None
+    mcp_headers: dict[str, str] | None

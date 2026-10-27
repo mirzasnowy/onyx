@@ -10,7 +10,7 @@
 **Edition:** CE
 **Owns:**
 `backend/onyx/server/query_and_chat/streaming_models.py`, `placement.py`,
-`backend/onyx/chat/emitter.py`, `stream_buffer.py`, `renderer.py`, `presentation.py`,
+`backend/onyx/chat/emitter.py`, `stream_buffer.py`,
 `web/src/app/app/services/streamingModels.ts`, `web/src/lib/search/streamingUtils.ts`,
 `mobile/src/chat/streamingModels.ts`, `mobile/src/chat/ndjson.ts`
 
@@ -52,49 +52,12 @@ one JSON object per line this way.
 | `CHAT_STREAM_BUFFER_TTL_S` | 3600 | TTL of each buffered chunk and the run's meta key while the run is in progress. |
 | `CHAT_STREAM_BUFFER_DONE_TTL_S` | 600 | TTL applied to the same keys once the run finishes. |
 | `CHAT_STREAM_BUFFER_MAX_BYTES` | 16 MiB | Cap on compressed bytes per run; past this the buffer is marked `truncated` and resume stops being possible. |
-| `INTEGRATION_TESTS_MODE` | | Enables `ToolCallDebug` packets (`llm_loop.py`, guarded by `if INTEGRATION_TESTS_MODE and tool_calls`). |
 
 `_RESUME_MAX_CHUNKS_PER_READ = 32` (`chat_backend.py`) caps how many buffer chunks
 `resume_chat_stream` decompresses per loop iteration, bounding peak memory on a
 resume read.
 
 ---
-
-### Shared runtime presentation
-
-`chat/renderer.py` converts accepted model content and tool results into existing
-browser packets. `chat/presentation.py:ResponsePresenter` consumes shared runtime
-events. `replay_response` uses the same renderers for saved response records.
-The caller supplies saved search documents and tool IDs as detached tool records.
-Neither path runs a model or executes a tool.
-
-`chat/response.py` captures accepted steps before display processing. A display
-failure can therefore leave a complete response record available for saving.
-`chat/response_models.py` separates response content from per-message rendering
-settings, such as citation display and research phase.
-
-The detached response record is an in-memory aggregate. Database codecs restore
-concrete tool-result types before replay. It is not a standalone JSON storage schema.
-The response owner classifies execution failures and reports them separately.
-Session reload carries the saved message error alongside rendered packets.
-`OverallStop` ends rendering; it does not assert that execution succeeded.
-Only tool failures explicitly marked for public display produce error packets.
-Other tool errors remain available to the model for recovery.
-
-These APIs prepare the shared runtime transition. Production chat, research,
-coding, and session reload still use their existing execution and loading paths.
-
-### Independent delivery primitives
-
-`ChatDelivery` owns packet publication and replay writes. Its `ChatStream` reader
-can detach without stopping delivery. A shared publication lock keeps live packets
-and replay batches in the same order. Cache writes run outside that lock, so slow
-storage does not block control packets.
-
-Closing delivery drains accepted events before sealing publication. Replay backlog
-limits and cache failures mark the buffer incomplete. Readers must reload saved
-history when replay has a gap. These primitives are additive; production chat
-still uses its existing worker and reader lifecycle.
 
 If the delivery worker cannot start during completion, the caller finalizes replay.
 It marks normal replay incomplete and deletes content-free incognito buffers before resolving completion.
@@ -119,6 +82,8 @@ api-server pod can replay and tail an in-flight run:
 - Both live in `CacheBackend` (Redis, or Postgres on the lite deployment flavor)
   with TTL `CHAT_STREAM_BUFFER_TTL_S`, extended to `CHAT_STREAM_BUFFER_DONE_TTL_S`
   once `mark_done` runs.
+- Temporary-history teardown deletes the session's literal stream-key prefix through `CacheBackend.delete_prefix`.
+  This includes orphaned chunks and earlier stream IDs; metadata counters alone cannot identify every stored chunk.
 - Incognito (content-free) runs set `delete_on_done=True`: `mark_done` deletes
   every chunk and the meta key immediately instead of expiring them, so no
   content survives past the run.
@@ -161,17 +126,27 @@ string values.
 | Coding agent | `CodingAgentStart`, `CodingAgentThinkingDelta`, `CodingAgentFinal` | Query/repo, thinking tokens, final answer. Shares the run with `BashToolStart`/`BashToolDelta` for the shell it drives. |
 | Bash tool | `BashToolStart`, `BashToolDelta` | Command, then `stdout`/`stderr`/`exit_code`/`timed_out`. |
 
+The LLM stream carries raw tool-argument fragments. `MessageRenderer` decodes them
+incrementally only for Python code and the configured reasoning tool. It emits the
+existing `ToolCallArgumentDelta` or reasoning packets. Other tools use finalized
+arguments when execution starts. Saved interrupted calls retain raw arguments for
+display without becoming executable. When a run ends, its unfinished tool cards receive
+the same start/end packets as saved replay. This also closes Python code-writing indicators
+when execution stops before a tool starts. Completed tool cards do not emit another end packet.
+Completed coding-tool answers emit only final-answer packets. Research reports emit once,
+whether delivered through a progress update or directly at completion.
+
 ### 4.2 `Placement`
 
 `Placement` (`placement.py:Placement`) is the coordinate every packet carries:
 
 - `turn_index`: the frontend's rendering block index, not a backend turn. One
   LLM inference producing reasoning plus a tool call is one backend step but
-  advances `turn_index` more than once (`llm_step.py:_increment_turns` pattern,
-  driven from `llm_loop.py`).
+  advances `turn_index` more than once through
+  `backend/onyx/chat/renderer.py:ResponseLayout.next_section`.
 - `tab_index`: disambiguates parallel tool calls that share a `turn_index`, so
-  each gets its own tab in the UI (`llm_step.py`, built during fallback tool
-  extraction with `enumerate(matched_tool_calls)`).
+  each gets its own tab in the UI
+  (`backend/onyx/chat/renderer.py:MessageRenderer.tool_placement`).
 - `sub_turn_index`: nesting level for a tool that calls other tools; `None` at
   the top level.
 - `model_index`: which model produced the packet in a multi-model turn (`0`,
@@ -182,21 +157,14 @@ string values.
 
 `Emitter.emit` (`emitter.py:Emitter.emit`):
 
-1. No-ops immediately if `drain_done` is set, so a cancelled turn's workers stop
-   pushing packets without blocking on the queue.
-2. Passes the packet to the turn's fleet `QueryObservation`, if any
+1. Passes the packet to the turn's fleet `QueryObservation`, if any
    (`packet_queued`). In the worker thread, it records the model's LLM cycle
    count at its first answer text, per [[observability]].
-3. Copies the packet's `Placement` with `model_index` overwritten
+2. Copies the packet's `Placement` with `model_index` overwritten
    (`base.model_copy(update={"model_index": self._model_idx})`). The producer's
    own `model_index`, if any, is discarded here.
-4. Puts `(model_idx, tagged_packet)` onto the shared `merged_queue`, the same
-   queue every model's worker thread writes to, per [[core-chat-loop]].
-
-`NullEmitter` (`emitter.py:NullEmitter`) implements the same interface but
-discards every packet. It is used where tools run outside a chat turn (the
-Search API, the MCP server), so tool code does not need to branch on whether it
-is inside a streaming context.
+3. Publishes the packet through the turn's `ChatDelivery`. A publication lock
+   preserves the same packet order for live delivery and replay storage.
 
 ### 4.4 Transport
 
@@ -229,12 +197,21 @@ chat generator still runs through Starlette's thread pool for each yielded packe
 
 ### 4.5 Buffering and resume
 
-`process_message.py` constructs one `StreamBufferWriter` per run
-(`process_message.py`, near `stream_buffer = StreamBufferWriter(...)`) and calls
-`stream_buffer.append_line(get_json_line(...))` for every packet before it
-reaches the HTTP response, in addition to yielding it live. `flush` compresses
-and writes a new chunk once `_FLUSH_THRESHOLD_BYTES` of pending text accumulates;
-`mark_done` finalizes the meta record when the run ends.
+`ChatDelivery` sends packets to the live reader and stages serialized lines for
+`StreamBufferWriter`. The event worker drains a full 256-line batch immediately,
+including when one event produces many packets. It also flushes smaller batches
+every 50 ms. Cache I/O runs outside the publication lock, so control and
+persistence threads can keep publishing while a cache write blocks.
+
+`StreamBufferWriter` compresses lines into cache chunks, flushing at 32 KiB or
+when the delivery worker requests a flush. `mark_done` finalizes replay retention
+or deletes content-free incognito buffers.
+
+Replay overflow, cache errors, and storage limits make the stream non-resumable;
+they do not fail live delivery. `STREAM_GAP` reports missing live output, such as
+reader overflow or failed agent-event delivery. Completion checks unfinished
+events separately from cache cleanup, so a slow final cache write does not
+produce a false live-stream error.
 
 `resume_chat_stream` (`chat_backend.py:resume_chat_stream`) finds the stream ID in
 the processing fence (`get_processing_stream_id`), then replays from
@@ -306,9 +283,8 @@ emitting `ChatHeartbeat` packets on `CHAT_HEARTBEAT_INTERVAL_S` while waiting.
 ## 6. Relationships
 
 **Depends on**
-- [[core-chat-loop]]: `llm_loop.py` and `llm_step.py` are the packet producers;
-  `process_message.py` owns the `Emitter` and `StreamBufferWriter` lifecycle per
-  run.
+- [[core-chat-loop]]: `backend/onyx/chat/renderer.py` produces packets;
+  `backend/onyx/chat/execution.py` owns stream publication for the turn.
 - [[citations]]: `CitationInfo` packets originate from the citation processor
   running inside the loop.
 - [[tools-framework]]: each tool family's packets are defined by that tool's
@@ -334,7 +310,7 @@ emitting `ChatHeartbeat` packets on `CHAT_HEARTBEAT_INTERVAL_S` while waiting.
 |---|---|
 | adds a packet type | `StreamingType` and the `PacketObj` union; `web/src/app/app/services/streamingModels.ts:PacketType` and its interface; `mobile/src/chat/streamingModels.ts`; a `findRenderer` case (and mobile's `findRenderer.ts`) or the packet silently renders nothing |
 | renames a packet type | every hand-mirrored enum above; any Playwright mock stream in `web/tests/e2e/utils/chatMock.ts` that hardcodes the old string; a saved stream buffer chunk mid-flight uses the old name until it drains |
-| changes `Placement` (adds/removes/redefines a field) | every call site that constructs `Placement(...)` in `llm_loop.py` and `llm_step.py`; `Emitter.emit`'s `model_copy(update=...)`; the frontend `Placement` interface in `streamingModels.ts`; the grouping logic that keys off `turn_index`/`tab_index` in [[chat-frontend]] |
+| changes `Placement` (adds/removes/redefines a field) | every call site that constructs `Placement(...)` in `backend/onyx/chat/renderer.py`; `Emitter.emit`'s `model_copy(update=...)`; the frontend `Placement` interface in `streamingModels.ts`; the grouping logic that keys off `turn_index`/`tab_index` in [[chat-frontend]] |
 | changes a tool's packet sequence (adds/reorders/removes a stage) | that tool's renderer under `web/src/app/app/message/messageComponents/renderMessageComponent.tsx` and its mobile equivalent; [[tools-framework]] for the tool's producer-side contract |
 | changes the transport framing (NDJSON, line delimiter, SSE headers) | `handleSSEStream` and `withoutHeartbeats` on web; `NdjsonBuffer` on mobile; `resume_chat_stream`'s replay, since buffered chunks are raw NDJSON bytes written by the old framing |
 | changes stream buffer TTLs or chunk size | resumability window for slow clients; `_RESUME_MAX_CHUNKS_PER_READ` memory bound in `chat_backend.py` |
@@ -355,9 +331,10 @@ and `web/tests/e2e/utils/chatMock.ts` (`buildMockStream`, `mockChatEndpoint`) bu
 and parse mock NDJSON bodies matching this exact format; use them when a test
 needs to assert on packet ordering or a new packet type without a real LLM call.
 
-`INTEGRATION_TESTS_MODE=true` is required for tests that need `ToolCallDebug`
-packets to assert which tool ran and with what arguments
-(`llm_loop.py`, gated by `if INTEGRATION_TESTS_MODE and tool_calls`).
+`backend/onyx/chat/renderer.py:ToolRenderer.start` emits `ToolCallDebug` only in
+integration-test mode, before the start packet. Debug packets must not close a
+coding-agent bash step before its output arrives.
+Tests can use them to assert tool names and arguments without an environment flag.
 
 ### Manual reproduction
 
@@ -404,16 +381,16 @@ packets to assert which tool ran and with what arguments
   `blocks` comes back empty, not stop at the first `done=True`.
 
 
-### Response rendering safeguards
+### Tool rendering and replay
 
-Malformed tool arguments use a generic card so saved errors and later answers can
-still render. Replay hides the configured thinking tool. Answers that start with a
-citation retain its metadata. Interrupted responses retain citations only for the
-selected answer text. Tool debug packets appear only in integration-test mode,
-before the tool start packet.
-
+Malformed model arguments use a generic tool card. They do not prevent the saved
+error or later answer from loading. Tools retain their existing error-display
+policy; a model-facing error alone does not request a browser error marker.
 Generic model-facing error text is not displayed. Explicit public error details and
 structured tool output retain their existing rendering.
+
+Live and saved answers retain citation metadata when the answer starts with a
+citation. Saved history hides the configured thinking tool, just as live output does.
 Coding-child reasoning uses `CodingAgentThinkingDelta`, including native thinking
 and configured thinking-tool output. Replay assigns sections in accepted content
 order. Answer sections close before intervening thinking or tool calls; later answer text starts a new section.
@@ -421,10 +398,10 @@ Only consecutive top-level tool calls share tabs. Text or reasoning between call
 Generated-message metadata supplies saved source references, including previously
 retrieved sources that the current response did not retrieve again.
 
-When a run ends, unfinished tool cards receive the same start and end packets as
-saved replay. This closes Python code-writing indicators when execution stops
-before a tool starts. Completed tool cards do not emit another end packet.
-Tool-card ownership includes the run ID, so child completion does not close a
-parent's cards. Completed coding tools emit final-answer packets without repeating
-the answer as thinking. Research reports emit once, whether supplied through
-progress or directly at completion.
+
+### Saved response replay
+
+`db/chat_response.py:read_response_replay_data` loads detached documents and tool identities.
+`chat/presentation.py:replay_response` renders those values without database access.
+Live and saved output share the renderer. Accepted message IDs remain required;
+replay does not invent IDs for incomplete records.

@@ -16,10 +16,9 @@
 **Read first:** `backend/onyx/chat/README.md`. Its "Reasons / Experiments" section
 is the rationale behind the ordering and the reminder placement in this document.
 The functions that assemble the final message list
-(`construct_message_history`, `_build_project_message`,
-`_create_context_files_message`, `_create_file_tool_metadata_message`,
-`select_reminder_text`) live in `backend/onyx/chat/llm_loop.py`, which
-[[core-chat-loop]] owns. This document describes what those functions build and
+(`prepare_prompt`, `_create_context_files_message`, `_create_file_tool_metadata_message`,
+`build_chat_reminder`) live in `backend/onyx/chat/prompt_utils.py`, which
+this component owns. This document describes what those functions build and
 why; core-chat-loop describes when they run.
 
 ---
@@ -52,7 +51,7 @@ project's highest review bar for tone-deaf edits (see §9).
 ## 2. Surfaces
 
 This component has no HTTP endpoints of its own. It is consumed entirely from
-inside [[core-chat-loop]]'s `run_llm_loop` (`backend/onyx/chat/llm_loop.py`) and
+inside [[core-chat-loop]]'s `backend/onyx/chat/agent.py:ChatAgent` and
 `build_chat_turn` (`backend/onyx/chat/process_message.py`). Two endpoints expose
 its token math to the frontend:
 
@@ -85,7 +84,7 @@ This component reads persona and project rows but does not own them
   `Persona.datetime_aware`: drive §4.1 and §4.2.
 - `Project.instructions`: the fallback source for the custom agent prompt when
   the default persona is used inside a project
-  (`chat_utils.py:get_custom_agent_prompt`).
+  (`prepare.py:get_custom_agent_prompt`).
 - `Memory` rows, surfaced through `db/memory.py:get_memories` into a
   `UserMemoryContext`, feed the per-user "User Information" message that follows
   the system prompt (`prompt_utils.py:build_user_information_prompt`).
@@ -106,7 +105,7 @@ migrations).
 
 ### 4.0 The assembled context, annotated
 
-Per cycle, `llm_loop.py:construct_message_history` produces this order:
+Per cycle, `backend/onyx/chat/prompt_utils.py:prepare_prompt` produces this order:
 
 ```
 [system]                     -- base prompt + dynamic sections, or persona's own
@@ -126,17 +125,11 @@ Per cycle, `llm_loop.py:construct_message_history` produces this order:
 [reminder]                   -- USER_REMINDER message, always last (§4.5)
 ```
 
-This whole list is rebuilt from scratch on every LLM cycle inside one turn, not
-once per turn. A turn that runs three tool cycles calls
-`construct_message_history` three times, each with a growing
-`[tool calls and responses]` section and a freshly recomputed reminder.
-
-The file helpers in `chat/files.py` serve the existing chat engines.
-Their result model lives in `chat/models.py`; pending and unavailable file
-notices live in `prompts/chat_prompts.py`.
-`chat/prompt_formatting.py` prepares shared runtime messages: it selects images,
-wraps reminders, and sets cache metadata. The existing engines still use
-`translate_history_to_llm_format`; switching engines is a separate change.
+The SDK rebuilds this list for each model call and after compaction. Prompt assembly
+borrows history without modifying its messages or nested payloads. It creates replacement
+message containers and metadata for prompt changes. Formatting returns detached model
+messages, including native image parts. Selected lazy file descriptors are copied before
+loading; their synchronized content cache remains shared.
 
 ### 4.1 System prompt
 
@@ -175,19 +168,17 @@ wraps reminders, and sets cache metadata. The existing engines still use
 If `persona.replace_base_system_prompt` is set, none of this runs. The
 persona's own `system_prompt`, run through `prompt_utils.py:process_prompt_template`,
 becomes the entire system message, and `custom_agent_prompt_msg` is forced to
-`None` (`llm_loop.py:run_llm_loop`, the `if persona and persona.replace_base_system_prompt`
-branch).
+`None` (`backend/onyx/chat/prompt_utils.py:build_chat_prompt`).
 
 If the default base prompt is an empty string and no replacement is set, the
 custom agent prompt (if any) is promoted to `MessageType.SYSTEM` instead of
-`USER`, and stops moving (`llm_loop.py:run_llm_loop`, the trailing `else` branch
-under system-prompt handling).
+`USER`, and stops moving (`backend/onyx/chat/prompt_utils.py:build_chat_prompt`).
 
 ### 4.2 Custom agent prompt
 
-Resolved once per turn by `chat_utils.py:get_custom_agent_prompt(persona, chat_session)`,
-before `run_llm_loop` starts (`process_message.py:build_chat_turn`), because the
-loop should not need DB access mid-turn. Project and custom-agent instructions
+Resolved once per turn by `prepare.py:get_custom_agent_prompt(persona, chat_session)`,
+during `prepare.py:prepare_chat_turn`, before workers start. The agent uses
+captured instructions without reading the database mid-turn. Project and custom-agent instructions
 are combined; agent instructions take precedence on conflicts. A default agent
 uses project instructions alone. When `replace_base_system_prompt` is set, the
 agent instructions form the system message and project instructions remain a
@@ -197,9 +188,9 @@ Project files and custom-agent files are combined and deduplicated before
 context budgeting. Prompt loading, file-reading tools, and overflow retrieval
 must retain both sources. See [[projects]] §4.4-4.5.
 
-Inside `run_llm_loop`, unless it has been promoted into the system message
-(§4.1), the custom agent prompt is rebuilt every cycle as a
-`MessageType.USER` `ChatMessageSimple` and inserted by `construct_message_history`
+Unless it has been promoted into the system message (§4.1),
+`prompt_utils.py:build_chat_prompt` builds the custom prompt as a `UserMessage`.
+`prompt_utils.py:prepare_prompt` inserts it
 directly above the last user message, ahead of the project/context files. It
 therefore "moves": on turn *N+1* it sits above the turn *N+1* user message, not
 where it appeared in turn *N*'s history.
@@ -212,8 +203,8 @@ code preserves it. Project files (and persona-attached files) load through
 become history messages in `chat_utils.py:convert_chat_history`, one message per
 text file, tagged with `file_id`.
 
-`files.py:load_all_chat_files` reads attachment token counts and processing
-status on the caller thread before starting content workers. Workers receive
+`db/user_file.py:prepare_chat_file_inputs` reads attachment token counts and processing
+status in one batch on the caller thread before `chat/files.py:load_chat_files` starts content workers. Workers receive
 scalar values, so they cannot share the caller's database session. Plaintext
 loading stays parallel, with at most 16 workers; raw bytes stay lazy. While a
 file is processing or indexing, inline extraction does not replace the worker's
@@ -246,7 +237,7 @@ entries instead. At or above it, they fall back to
 `use_as_search_filter` (vectorized, RAG-retrievable through the search tool) or,
 when the vector DB is disabled, to lightweight `FileToolMetadata` entries that
 name whichever retrieval tool this cycle actually offers
-(`llm_loop.py:_create_file_tool_metadata_message`).
+(`backend/onyx/chat/prompt_utils.py:_create_file_tool_metadata_message`).
 
 Project files are additionally vectorized into the search index when the vector DB is enabled
 (`chat/README.md`, "Projects"), independent of whether they fit in context, so
@@ -254,7 +245,7 @@ a model with a smaller window can RAG over the project instead of losing it.
 
 ### 4.4 Document JSON shape
 
-`llm_loop.py:_create_context_files_message` renders in-context files as:
+`backend/onyx/chat/prompt_utils.py:_create_context_files_message` renders in-context files as:
 
 ```
 Here are some documents provided for context, they may not all be relevant:
@@ -282,7 +273,7 @@ one turn collapse into a single message rather than one message per document.
 
 ### 4.5 Reminder
 
-`llm_loop.py:select_reminder_text` picks the trailing reminder each cycle, in
+`backend/onyx/chat/prompt_utils.py:build_chat_reminder` picks the trailing reminder each cycle, in
 priority order: an image-generation reminder if this cycle just ran image gen,
 an open-URL nudge if a web search just ran, the open-URL tool is actually
 available this cycle, and this is not the last cycle, otherwise `prompt_utils.py:build_reminder_message`, which
@@ -368,10 +359,17 @@ that order would let files claim space the prompt still needs.
 See [[file-store-and-user-files]] §4.4 for metadata capture and content-loading
 session boundaries.
 
-Inside `run_llm_loop`, `available_tokens` is further reduced per cycle by
-`compute_all_tool_tokens(final_tools, token_counter)` before
-`construct_message_history` is called, since tool definitions themselves
-consume input tokens.
+The SDK counts the assembled request, including tool definitions, before each
+model call. It reuses that count for the output allowance. Each run caches token
+counts by exact text, so unchanged content avoids repeated tokenization. Changed
+prompts, tool definitions, and results get new counts. After counting a request,
+the cache retains only text used by that request. It clears during execution cleanup.
+
+Provider-specific counters from `get_llm_token_counter` also cache counts locally,
+with a 1,024-entry limit. These counters support prompt preparation across the
+feature agents. Neither cache shares conversation content across tenants. SDK
+context fitting retains its own counting rules; it does not use the display and
+tracing estimates attached to prepared messages.
 
 ### 4.9 Compression
 
@@ -413,24 +411,35 @@ conversation in an out-of-Postgres store for the session's lifetime
 (`incognito_context.py:load_incognito_context`,
 `incognito_context.py:append_incognito_message`).
 
-`incognito_context.py:_locked_incognito_state` supplies one tenant/session lock
-for saves and teardown. `_update_incognito_state` reads history and agent fields
-under that lock and commits both replacements atomically with the same idle
-TTL. Callbacks receive values, not Redis commands. The existing history save
-preserves agent fields and rejects stale versions without retrying. Agent-history
-callers follow in later SDK changes. Teardown uses the same lock to write the
-tombstone and delete the agent hash together. Before attempting teardown, it
-retains the session ID in a tenant-prefixed pending set. A busy lock queues
-the existing incognito cleanup task after 60 seconds. That task also runs
-periodically and retries pending sessions without waiting on busy locks.
-Requests remain pending until history, agent records, and buffered answers
-have been cleared, including when task publication fails.
+`incognito_context.py` stores canonical root messages and child response records in one JSON envelope.
+The envelope has a sliding one-hour TTL, a one-megabyte limit, and at most 200 root messages.
+It evicts older child records before older root messages. An oversized new response leaves stored state unchanged.
+The `incognito_ctx:v2` namespace starts fresh temporary sessions after deployment. Old content expires through its existing TTL.
+The obsolete tenant-scoped `incognito_ctx:pending_teardowns` set contains only session IDs and has no TTL.
+Deployment cleanup can delete that obsolete metadata key after old writers drain; no content migration or old-format reader is needed.
 
-Lock acquisition waits at most five seconds per attempt. The lease lasts 60
-seconds; ownership is checked immediately before writing. Work must finish
-within the lease, following the existing Redis lock pattern. Bounded lock
-retries reload state and rerun the callback; callbacks must not perform
-external writes.
+The store uses `CacheBackend`, but remains available only with Redis.
+Postgres cache must not receive USAGE_ONLY content. The internal cache accessor enforces this boundary.
+`_locked_incognito_state` supplies one tenant/session lock for saves and teardown.
+A single cache write replaces root and child state together. Version checks reject stale history replacements.
+Response saves retry transformations against fresh state and reject conflicting replay of the same response.
+
+Teardown sets a separate tombstone before waiting for cleanup. Reads and writes check that marker.
+Its TTL covers the history and stream-buffer lifetimes. Cleanup removes the envelope under the session lock.
+`CacheBackend.delete_prefix` removes every buffered stream for that session, including chunks without metadata.
+It matches literal prefixes within one tenant. Redis and Postgres implement the same operation.
+The operation does not stop concurrent writers; stream writers still check session teardown and clean up on completion.
+
+A separate lock protects a bounded JSON list of pending cleanup IDs.
+Retry work takes at most 100 IDs and releases the index lock before taking session locks.
+A busy session queues the existing cleanup task after 60 seconds; periodic cleanup also retries it.
+IDs remain queued until history and buffered output are removed, even if task publication fails.
+If the one-megabyte index is full, teardown attempts immediate cleanup without removing existing requests.
+If that also fails, the caller receives an error. The tombstone remains, and content still expires normally.
+
+Lock acquisition waits at most five seconds per attempt; the lease lasts 60 seconds.
+Ownership checks and bounded retries follow the existing lock policy. They do not make lease expiry and writes atomic.
+Retry callbacks must not perform external writes. Errors and logs omit temporary conversation content.
 
 ### Worked examples (from `chat/README.md`)
 
@@ -629,8 +638,3 @@ cd backend && uv run pytest tests/integration -k chat
   actual tool set for the turn is known. It will overshoot the real prompt size
   on any turn that does not use every tool; this is intentional slack, not a
   bug to tighten.
-
-
-Shared file preparation uses public helpers in `chat/files.py`. Prompt formatting
-imports `PromptMetadata` from `chat/models.py`, so callers share the data type
-without importing the formatter to access its definition.

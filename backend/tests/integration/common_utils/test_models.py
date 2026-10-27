@@ -197,8 +197,8 @@ class DAQueryHistoryEntry(DATestChatSession):
 
 
 class ToolName(str, Enum):
-    INTERNET_SEARCH = "internet_search"
-    INTERNAL_SEARCH = "run_search"
+    INTERNET_SEARCH = "web_search"
+    INTERNAL_SEARCH = "internal_search"
     IMAGE_GENERATION = "generate_image"
 
 

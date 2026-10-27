@@ -9,6 +9,7 @@ from sqlalchemy.sql.selectable import CTE
 
 from onyx.agents.execution_records import run_input_message_id
 from onyx.agents.models import AgentInfo, RunStatus, messages_from_steps
+from onyx.chat.models import MAX_DISCOVERED_AGENTS
 from onyx.chat.response_models import (
     ChatBranch,
     MessageRendering,
@@ -39,9 +40,6 @@ from onyx.db.models import ChatMessage, ChatResponseItem, ChatSession, ToolCall
 from onyx.llm.models import Message, UserMessage
 
 MAX_AGENT_HISTORY_BYTES = 16 * 1024 * 1024
-
-
-MAX_DISCOVERED_AGENTS = 128
 
 
 def load_chat_branch(message_id: int) -> ChatBranch:

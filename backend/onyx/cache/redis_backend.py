@@ -26,7 +26,10 @@ class RedisCacheLock(CacheLock):
         )
 
     def release(self) -> None:
-        self._lock.release()
+        try:
+            self._lock.release()
+        except LockNotOwnedError as error:
+            raise CacheLockLostError(str(error)) from error
 
     def extend(self, ttl_seconds: float) -> None:
         try:
@@ -76,6 +79,21 @@ class RedisCacheBackend(CacheBackend):
 
     def delete(self, key: str) -> None:
         self._r.delete(key)
+
+    def delete_prefix(self, prefix: str) -> None:
+        if not prefix:
+            raise ValueError("Cache deletion requires a nonempty prefix")
+        pattern = (
+            "".join("\\" + char if char in "\\*?[]" else char for char in prefix) + "*"
+        )
+        batch: list[bytes] = []
+        for key in self._r.scan_iter(match=pattern, count=100):
+            batch.append(key)
+            if len(batch) == 100:
+                self._r.delete(*batch)
+                batch.clear()
+        if batch:
+            self._r.delete(*batch)
 
     def exists(self, key: str) -> bool:
         return bool(self._r.exists(key))

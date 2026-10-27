@@ -3590,7 +3590,7 @@ class ChatMessage(Base):
     model_display_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Requested reasoning effort plus the kwargs actually sent to the provider.
-    request_params: Mapped[dict[str, Any] | None] = mapped_column(
+    request_params: Mapped[dict[str, JsonValue] | None] = mapped_column(
         postgresql.JSONB(), nullable=True
     )
 
@@ -3798,8 +3798,18 @@ class ToolCall(Base):
     reasoning_tokens: Mapped[str | None] = mapped_column(Text, nullable=True)
     # For "Agents" like the Research Agent for Deep Research -
     # the argument and final report are stored as the argument and response.
-    tool_call_arguments: Mapped[dict[str, JSON_ro]] = mapped_column(postgresql.JSONB())
-    tool_call_response: Mapped[str] = mapped_column(Text, default="")
+    tool_call_arguments: Mapped[dict[str, JsonValue]] = mapped_column(
+        postgresql.JSONB()
+    )
+    legacy_response: Mapped[str] = mapped_column("tool_call_response", Text, default="")
+
+    @property
+    def tool_call_response(self) -> str:
+        return self.result.text if self.result is not None else self.legacy_response
+
+    @tool_call_response.setter
+    def tool_call_response(self, value: str) -> None:
+        self.legacy_response = value
 
     # This just counts the number of tokens in the arg because it's all that's kept for the history
     # Only the top level tools (the ones with a parent_chat_message_id) have token counts that are counted

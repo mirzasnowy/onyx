@@ -1,35 +1,30 @@
 from __future__ import annotations
 
-import json
 from enum import Enum
 from typing import Any, Callable, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from onyx.chat.emitter import Emitter
-from onyx.configs.chat_configs import MAX_CHUNKS_FED_TO_CHAT, NUM_RETURNED_HITS
 from onyx.configs.constants import MessageType
 from onyx.context.models import UserMemoryContext
-from onyx.context.search.models import (
-    PersonaSearchInfo,
-    SearchDocsResponse,
-)
+from onyx.context.search.models import PersonaSearchInfo
 from onyx.file_store.models import (
     install_lazy_content_loader,
     maybe_materialize_lazy_content,
 )
-from onyx.server.query_and_chat.placement import Placement
-from onyx.tools.results import (
-    CustomToolCallSummary,
-    PythonExecutionFile,
-)
-from onyx.tools.tool_implementations.images.models import FinalImageGenerationResponse
-from onyx.tools.tool_implementations.memory.models import MemoryToolResponse
+from onyx.tools.constants import FILE_READER_MAX_CHARS
 from onyx.utils.headers import HeaderItemDict
 
-TOOL_CALL_MSG_FUNC_NAME = "function_name"
-TOOL_CALL_MSG_ARGUMENTS = "arguments"
+
+class FileReaderArguments(BaseModel):
+    file_id: str
+    start_char: int = 0
+    num_chars: int = FILE_READER_MAX_CHARS
+
+
+class MemoryArguments(BaseModel):
+    memory: str
 
 
 class ToolConfiguration(BaseModel):
@@ -70,11 +65,10 @@ class ToolCallException(Exception):
 
 
 class ToolExecutionException(Exception):
-    """Exception raise for errors during tool execution."""
+    """Tool execution failed."""
 
-    def __init__(self, message: str, emit_error_packet: bool = False):
+    def __init__(self, message: str, emit_error_packet: bool = False) -> None:
         super().__init__(message)
-
         self.emit_error_packet = emit_error_packet
 
 
@@ -82,86 +76,6 @@ class SearchToolUsage(str, Enum):
     DISABLED = "disabled"
     ENABLED = "enabled"
     AUTO = "auto"
-
-
-class ToolCallKickoff(BaseModel):
-    tool_call_id: str
-    tool_name: str
-    tool_args: dict[str, Any]
-
-    placement: Placement
-
-    def to_msg_str(self) -> str:
-        return json.dumps(
-            {
-                TOOL_CALL_MSG_FUNC_NAME: self.tool_name,
-                TOOL_CALL_MSG_ARGUMENTS: self.tool_args,
-            }
-        )
-
-
-class ToolResponse(BaseModel):
-    # Rich response is for the objects that are returned but not directly used by the LLM
-    # these typically need to be saved to the database to load things in the UI (usually both)
-    rich_response: (
-        # This comes from image generation, image needs to be saved and the packet about it's location needs to be emitted
-        FinalImageGenerationResponse
-        # This comes from internal search / web search, search docs need to be saved, already emitted by the tool
-        | SearchDocsResponse
-        # This comes from the memory tool, memory needs to be persisted to the database
-        | MemoryToolResponse
-        # This comes from open url, web content needs to be saved, maybe this can be consolidated too
-        # | WebContentResponse
-        # This comes from custom tools, tool result needs to be saved
-        | CustomToolCallSummary
-        # This comes from code interpreter, carries generated files
-        | PythonToolRichResponse
-        # If the rich response is a string, this is what's saved to the tool call in the DB
-        | str
-        | None  # If nothing needs to be persisted outside of the string value passed to the LLM
-    )
-    # This is the final string that needs to be wrapped in a tool call response message and concatenated to the history
-    llm_facing_response: str
-    # The original tool call that triggered this response - set by tool_runner
-    # The response is first created by the tool runner, which does not need to be aware of things like the tool_call_id
-    # So this is set after the response is created by the tool runner
-    tool_call: ToolCallKickoff | None = None
-
-
-class ParallelToolCallResponse(BaseModel):
-    tool_responses: list[ToolResponse]
-    updated_citation_mapping: dict[int, str]
-
-
-class ToolRunnerResponse(BaseModel):
-    tool_run_kickoff: ToolCallKickoff | None = None
-    tool_response: ToolResponse | None = None
-    tool_message_content: str | list[str | dict[str, Any]] | None = None
-
-    @model_validator(mode="after")
-    def validate_tool_runner_response(self) -> "ToolRunnerResponse":
-        fields = ["tool_response", "tool_message_content", "tool_run_kickoff"]
-        provided = sum(
-            1
-            for field in fields
-            if getattr(self, field) is not None  # ods: ignore[getattr]
-        )
-
-        if provided != 1:
-            raise ValueError(
-                "Exactly one of 'tool_response', 'tool_message_content', or 'tool_run_kickoff' must be provided"
-            )
-
-        return self
-
-
-class ToolCallFinalResult(ToolCallKickoff):
-    tool_result: Any = (
-        None  # we would like to use JSON_ro, but can't due to its recursive nature
-    )
-    # agentic additions; only need to set during agentic tool calls
-    level: int | None = None
-    level_question_num: int | None = None
 
 
 class ChatMinimalTextMessage(BaseModel):
@@ -174,43 +88,6 @@ class DynamicSchemaInfo(BaseModel):
     message_id: int | None
     user_id: UUID | None = None
     user_email: str | None = None
-
-
-class WebSearchToolOverrideKwargs(BaseModel):
-    # To know what citation number to start at for constructing the string to the LLM
-    starting_citation_num: int
-
-
-class OpenURLToolOverrideKwargs(BaseModel):
-    # To know what citation number to start at for constructing the string to the LLM
-    starting_citation_num: int
-    citation_mapping: dict[str, int]
-    url_snippet_map: dict[str, str]
-    max_urls: int = 10
-
-
-# None indicates that the default value should be used
-class SearchToolOverrideKwargs(BaseModel):
-    # To know what citation number to start at for constructing the string to the LLM
-    starting_citation_num: int
-    # This is needed because the LLM won't be able to do a really detailed semantic query well
-    # without help and a specific custom prompt for this
-    original_query: str | None = None
-    message_history: list[ChatMinimalTextMessage] | None = None
-    user_memory_context: UserMemoryContext | None = None
-    user_info: str | None = None
-
-    # Used for tool calls after the first one but in the same chat turn. The reason for this is that if the initial pass through
-    # the custom flow did not yield good results, we don't want to go through it again. In that case, we defer entirely to the LLM
-    skip_query_expansion: bool = False
-
-    # Number of results to return in the richer object format so that it can be rendered in the UI
-    num_hits: int | None = NUM_RETURNED_HITS
-    # Number of chunks (token approx) to include in the string to the LLM
-    max_llm_chunks: int | None = MAX_CHUNKS_FED_TO_CHAT
-    include_link: bool = False
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ChatFile(BaseModel):
@@ -246,41 +123,23 @@ class ChatFile(BaseModel):
         return object.__getattribute__(self, name)
 
 
-class PythonToolRichResponse(BaseModel):
-    """Rich response from the Python tool carrying generated files."""
+class ToolContext(BaseModel):
+    """Application data available to each tool in an agent step."""
 
-    generated_files: list[PythonExecutionFile] = []
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-
-class PythonToolOverrideKwargs(BaseModel):
-    """Override kwargs for the Python/Code Interpreter tool."""
-
-    chat_files: list[ChatFile] = []
-
-
-class SearchToolRunContext(BaseModel):
-    emitter: Emitter
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
-class ImageGenerationToolRunContext(BaseModel):
-    emitter: Emitter
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
-class CustomToolRunContext(BaseModel):
-    emitter: Emitter
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
-class MemoryToolResponseSnapshot(BaseModel):
-    memory_text: str
-    operation: Literal["add", "update"]
-    memory_id: int | None = None
-    index: int | None = None
+    user_memory_context: UserMemoryContext | None = None
+    user_info: str | None = None
+    citation_mapping: dict[int, str] = Field(default_factory=dict)
+    next_citation_num: int = 1
+    # On repeat searches, defer to the model's new queries instead of repeating
+    # the expansion flow that may have produced poor results on the first pass.
+    skip_search_query_expansion: bool = False
+    chat_files: list[ChatFile] = Field(default_factory=list)
+    url_snippet_map: dict[str, str] = Field(default_factory=dict)
+    # When False, don't pass memory context to search tools for query expansion
+    # (but still pass it to the memory tool for persistence)
+    inject_memories_in_prompt: bool = True
 
 
 CHAT_SESSION_ID_PLACEHOLDER = "CHAT_SESSION_ID"
@@ -320,3 +179,11 @@ class LlmOpenUrlResult(BaseCiteableToolResult):
 
     type: Literal["open_url"] = "open_url"
     content: str
+
+
+class PythonArguments(BaseModel):
+    code: str
+
+
+class BashArguments(BaseModel):
+    cmd: str

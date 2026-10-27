@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from onyx.chat.citation_utils import extract_citation_order_from_text
+from onyx.chat.presentation import replay_response
 from onyx.coding_agent.tool_definitions import (
     CODING_AGENT_QUERY_KEY,
     CODING_AGENT_REPO_KEY,
@@ -17,6 +18,7 @@ from onyx.db.chat import (
     get_db_search_doc_by_id,
     translate_db_search_doc_to_saved_search_doc,
 )
+from onyx.db.chat_response import read_chat_execution, read_response_replay_data
 from onyx.db.models import ChatMessage
 from onyx.db.tools import get_tool_by_id
 from onyx.deep_research.tool_definitions import (
@@ -536,6 +538,12 @@ def translate_assistant_message_to_packets(
     It needs to be a list of list of packets combined into indices for "steps".
     The final answer and citations are also a "step".
     """
+    execution = read_chat_execution(chat_message)
+    if execution is not None:
+        replay = read_response_replay_data(execution, db_session)
+        return replay_response(
+            execution.response, replay.tools, execution.presentation, replay.documents
+        )
     packet_list: list[Packet] = []
 
     if chat_message.message_type != MessageType.ASSISTANT:

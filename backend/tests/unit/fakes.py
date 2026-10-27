@@ -67,6 +67,13 @@ class FakeCache(CacheBackend):
         self.store.pop(key, None)
         self.expiries.pop(key, None)
 
+    def delete_prefix(self, prefix: str) -> None:
+        if not prefix:
+            raise ValueError("Cache deletion requires a nonempty prefix")
+        for key in list(self.store):
+            if key.startswith(prefix):
+                self.delete(key)
+
     def exists(self, key: str) -> bool:
         return key in self.store
 
