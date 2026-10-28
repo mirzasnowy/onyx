@@ -2,7 +2,7 @@ import { DocumentInfoPacket, StreamStopInfo } from "@/lib/search/types";
 import type { SearchFiltersRequest } from "@/lib/searchFilters/types";
 import { handleSSEStream } from "@/lib/search/streamingUtils";
 import { ReasoningEffortOverride } from "@/lib/languageModels/types";
-import { FeedbackType } from "@/app/app/interfaces";
+import { FeedbackType } from "@/app/app/types";
 import {
   BackendMessage,
   DocumentsResponse,
@@ -18,7 +18,7 @@ import {
   StreamingError,
   ToolCallMetadata,
   UserKnowledgeFilePacket,
-} from "../interfaces";
+} from "@/app/app/types";
 import { ReadonlyURLSearchParams } from "next/navigation";
 import { SEARCH_PARAM_NAMES } from "./searchParams";
 import { Packet } from "./streamingModels";
@@ -491,9 +491,14 @@ export function processRawChatHistory(
       nodeId: messageInfo.message_id,
       messageId: messageInfo.message_id,
       message: messageInfo.message,
-      type: messageInfo.error
-        ? "error"
-        : (messageInfo.message_type as "user" | "assistant"),
+      errorMessage: messageInfo.error_info?.error ?? messageInfo.error,
+      errorCode: messageInfo.error_info?.error_code,
+      isRetryable: messageInfo.error_info?.is_retryable,
+      errorDetails: messageInfo.error_info?.details,
+      type:
+        messageInfo.error_info || messageInfo.error
+          ? "error"
+          : (messageInfo.message_type as "user" | "assistant"),
       files: messageInfo.files,
       alternateAgentID:
         messageInfo.alternate_assistant_id !== null
