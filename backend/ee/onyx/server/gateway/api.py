@@ -232,6 +232,7 @@ def _drop_empty_text(message: ChatCompletionMessage) -> ChatCompletionMessage | 
             message.content is None
             and not message.tool_calls
             and not message.thinking_blocks
+            and not message.reasoning_content
         ):
             return None
         return message
