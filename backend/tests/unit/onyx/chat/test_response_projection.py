@@ -23,11 +23,16 @@ from onyx.agents.runtime import Agent, Run
 from onyx.agents.tools import AgentTool
 from onyx.chat.emitter import Emitter
 from onyx.chat.history_store import get_chat_history_store
-from onyx.chat.models import AnswerStreamPart, ChatResponseOutcome, PersistenceStatus
+from onyx.chat.models import (
+    AnswerStreamPart,
+    ChatMessageMetadata,
+    ChatResponseOutcome,
+    ChatResponseSnapshot,
+    PersistenceStatus,
+)
 from onyx.chat.persistence import ChatResponsePersistence
 from onyx.chat.presentation import ResponsePresenter, project_response
 from onyx.chat.process_message import gather_stream_full
-from onyx.chat.response_models import ChatMessageMetadata, ChatResponseSnapshot
 from onyx.chat.stream_buffer import ChatDelivery
 from onyx.configs.constants import DocumentSource
 from onyx.context.search.models import SearchDoc

@@ -15,7 +15,7 @@ from onyx.llm.cancellation import AgentCancelled, CancellationSignal
 from onyx.llm.interfaces import GenerationContext
 from onyx.llm.models import AssistantMessage, ToolCall, ToolDefinition, ToolResult
 from onyx.server.query_and_chat.streaming_models import Packet
-from onyx.tools.results import LlmPythonExecutionResult, PythonExecutionFile
+from onyx.tools.models import LlmPythonExecutionResult, PythonExecutionFile
 from onyx.tracing.flows import LLMFlow
 from tests.unit.onyx.agents.fakes import FakeModelClient
 

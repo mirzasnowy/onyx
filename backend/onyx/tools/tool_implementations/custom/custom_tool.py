@@ -20,14 +20,12 @@ from onyx.tools.models import (
     MESSAGE_ID_PLACEHOLDER,
     USER_EMAIL_PLACEHOLDER,
     USER_ID_PLACEHOLDER,
-    DynamicSchemaInfo,
-    ToolCallException,
-    ToolContext,
-)
-from onyx.tools.results import (
     CustomToolCallSummary,
     CustomToolErrorInfo,
     CustomToolUserFileSnapshot,
+    DynamicSchemaInfo,
+    ToolCallException,
+    ToolContext,
 )
 from onyx.tools.tool_implementations.custom.openapi_parsing import (
     REQUEST_BODY,

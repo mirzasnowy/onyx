@@ -13,15 +13,15 @@ from onyx.chat.history_store import ChatHistoryStore
 from onyx.chat.models import (
     PERSISTENCE_ERROR_MESSAGES,
     ChatResponseOutcome,
+    ChatResponseSnapshot,
     PendingChatResponseSave,
     PersistenceStatus,
-    StreamingError,
 )
 from onyx.chat.presentation import project_response
-from onyx.chat.response_models import ChatResponseSnapshot
 from onyx.chat.stream_buffer import ChatDelivery
 from onyx.llm.cancellation import AgentCancelled
 from onyx.llm.interfaces import LLM
+from onyx.server.query_and_chat.streaming_models import StreamingError
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()

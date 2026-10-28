@@ -15,7 +15,7 @@ from onyx.server.documents.models import (
     IndexingStatus,
     InputType,
 )
-from onyx.tools.results import GeneratedImage
+from onyx.tools.models import GeneratedImage
 
 """
 These data models are used to represent the data on the testing side of things.

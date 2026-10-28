@@ -27,11 +27,14 @@ from onyx.file_store.utils import (
 )
 from onyx.llm.models import ToolDefinition, ToolResult
 from onyx.tools.interface import Tool, parse_tool_arguments
-from onyx.tools.models import ChatFile, PythonArguments, ToolCallException, ToolContext
-from onyx.tools.results import (
+from onyx.tools.models import (
+    ChatFile,
     LlmPythonExecutionResult,
+    PythonArguments,
     PythonExecutionDelta,
     PythonExecutionFile,
+    ToolCallException,
+    ToolContext,
 )
 from onyx.tools.tool_implementations.python.code_interpreter_client import (
     CodeInterpreterClient,

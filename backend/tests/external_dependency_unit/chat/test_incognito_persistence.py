@@ -26,8 +26,7 @@ from onyx.chat.incognito_context import (
     save_incognito_context,
     teardown_incognito_session,
 )
-from onyx.chat.models import PromptMetadata
-from onyx.chat.response_models import ResponseRecord, SavedAgentContext
+from onyx.chat.models import PromptMetadata, ResponseRecord, SavedAgentContext
 from onyx.configs.constants import DocumentSource, FileOrigin
 from onyx.context.search.models import SearchDoc
 from onyx.db.chat import (
@@ -53,8 +52,7 @@ from onyx.llm.models import (
     UserMessage,
 )
 from onyx.redis.redis_pool import get_redis_client
-from onyx.tools.records import RecordedToolCallInfo
-from onyx.tools.results import CustomToolCallSummary
+from onyx.tools.models import CustomToolCallSummary, ToolCallInfo
 from onyx.tracing.flows import LLMFlow
 from shared_configs.contextvars import CURRENT_CONTENT_FREE_SESSION_ID_CONTEXTVAR
 from tests.external_dependency_unit.conftest import create_test_user, delete_test_user
@@ -117,7 +115,7 @@ def test_save_chat_turn_keeps_the_row_but_writes_no_text(
         message_text="the acquisition target is confidential",
         reasoning_tokens="secret reasoning",
         tool_calls=[
-            RecordedToolCallInfo(
+            ToolCallInfo(
                 message_id="test-run:0",
                 parent_tool_call_id=None,
                 turn_index=0,
@@ -476,7 +474,7 @@ def test_incognito_response_restores_agents_without_database_content(
     from onyx.agents.runtime import Agent
     from onyx.agents.tools import AgentTool, ToolInvocation
     from onyx.chat.history_store import get_chat_history_store
-    from onyx.chat.response_models import ChatResponseSnapshot, MessageRendering
+    from onyx.chat.models import ChatResponseSnapshot, MessageRendering
     from onyx.chat.subagents import create_chat_agent_coordinator
     from onyx.db.enums import IncognitoRecordMode
     from onyx.db.models import ChatResponseItem

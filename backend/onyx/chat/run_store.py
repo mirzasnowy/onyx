@@ -24,14 +24,14 @@ from onyx.agents.runtime import Agent, Run, RunNotTransferable
 from onyx.cache.factory import get_cache_backend
 from onyx.cache.interface import CacheBackend
 from onyx.chat.checkpoint import deserialize_checkpoint, serialize_checkpoint
-from onyx.chat.response import response_record, response_snapshot
-from onyx.chat.response_models import (
+from onyx.chat.models import (
     CheckpointBinding,
     ResponseOwner,
     ResponseRecord,
     ResponseStatus,
     SavedResponse,
 )
+from onyx.chat.response import response_record, response_snapshot
 from onyx.chat.restoration import persist_checkpoint_files
 from onyx.configs.constants import MessageType
 from onyx.db.chat_checkpoint import (

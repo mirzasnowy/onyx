@@ -11,8 +11,12 @@ from onyx.configs.app_configs import (
 from onyx.db.code_interpreter import fetch_code_interpreter_server
 from onyx.llm.models import ToolDefinition, ToolResult
 from onyx.tools.interface import Tool, parse_tool_arguments
-from onyx.tools.models import BashArguments, ToolCallException, ToolContext
-from onyx.tools.results import LlmBashExecutionResult
+from onyx.tools.models import (
+    BashArguments,
+    LlmBashExecutionResult,
+    ToolCallException,
+    ToolContext,
+)
 from onyx.tools.tool_implementations.python.code_interpreter_client import (
     CodeInterpreterClient,
 )

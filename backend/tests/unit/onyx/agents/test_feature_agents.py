@@ -25,6 +25,7 @@ from onyx.configs.constants import DocumentSource
 from onyx.context.search.models import SearchDoc, SearchDocsResponse
 from onyx.deep_research.agent import DeepResearchAgent
 from onyx.deep_research.models import (
+    ResearchAgentCallResult,
     ResearchMessageMetadata,
     ResearchPhase,
 )
@@ -64,7 +65,6 @@ from onyx.server.query_and_chat.streaming_models import (
     Packet,
 )
 from onyx.tools.models import ToolContext
-from onyx.tools.results import ResearchAgentCallResult
 from onyx.tools.tool_implementations.bash.bash_tool import BashTool
 from onyx.tools.tool_implementations.coding_agent.coding_agent_tool import (
     CodingAgentTool,

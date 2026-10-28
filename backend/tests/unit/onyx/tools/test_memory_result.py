@@ -18,8 +18,7 @@ from onyx.context.models import UserInfo, UserMemoryContext
 from onyx.llm.cancellation import CancellationSignal
 from onyx.llm.interfaces import LLM
 from onyx.llm.models import AssistantMessage, ToolCall, ToolResultMessage
-from onyx.tools.models import ToolContext
-from onyx.tools.results import MemoryUpdated
+from onyx.tools.models import MemoryUpdated, ToolContext
 from onyx.tools.tool_implementations.memory.memory_tool import MemoryTool
 
 

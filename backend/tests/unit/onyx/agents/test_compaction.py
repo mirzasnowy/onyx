@@ -47,10 +47,9 @@ from onyx.agents.tools import (
 )
 from onyx.chat.chat_utils import convert_chat_history
 from onyx.chat.files import build_file_context
-from onyx.chat.models import ChatHistoryMessage
+from onyx.chat.models import ChatHistoryMessage, CheckpointBinding
 from onyx.chat.prompt_formatting import prompt_metadata
 from onyx.chat.prompt_utils import prepare_prompt
-from onyx.chat.response_models import CheckpointBinding
 from onyx.configs.constants import MessageType
 from onyx.file_store.models import ChatFileType, ChatLoadedFile
 from onyx.llm.cancellation import AgentCancelled, CancellationSignal

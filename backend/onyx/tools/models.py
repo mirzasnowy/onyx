@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from onyx.configs.constants import MessageType
 from onyx.context.models import UserMemoryContext
-from onyx.context.search.models import PersonaSearchInfo
+from onyx.context.search.models import PersonaSearchInfo, SearchDoc
 from onyx.file_store.models import (
     install_lazy_content_loader,
     maybe_materialize_lazy_content,
@@ -17,14 +17,52 @@ from onyx.tools.constants import FILE_READER_MAX_CHARS
 from onyx.utils.headers import HeaderItemDict
 
 
+class CustomToolErrorInfo(BaseModel):
+    is_unreachable: bool = False
+    is_auth_error: bool = False
+    status_code: int | None
+    message: str
+
+
+class GeneratedImage(BaseModel):
+    file_id: str
+    url: str
+    revised_prompt: str
+    shape: str | None = None
+
+
 class FileReaderArguments(BaseModel):
     file_id: str
     start_char: int = 0
     num_chars: int = FILE_READER_MAX_CHARS
 
 
+class FileReadResult(BaseModel):
+    type: Literal["file_read_result"] = "file_read_result"
+    file_name: str
+    file_id: str
+    start_char: int
+    end_char: int
+    total_chars: int
+    preview_start: str = ""
+    preview_end: str = ""
+
+
+class MemoryOperation(str, Enum):
+    ADD = "add"
+    UPDATE = "update"
+
+
 class MemoryArguments(BaseModel):
     memory: str
+
+
+class MemoryUpdated(BaseModel):
+    type: Literal["memory_result"] = "memory_result"
+    memory_text: str
+    operation: MemoryOperation
+    memory_id: int | None = None
+    index: int | None = None
 
 
 class ToolConfiguration(BaseModel):
@@ -64,6 +102,13 @@ class ToolCallException(Exception):
         self.llm_facing_message = llm_facing_message
 
 
+class ToolExecutionError(BaseModel):
+    """A tool failure that must also be shown to the user."""
+
+    type: Literal["tool_execution_error"] = "tool_execution_error"
+    message: str
+
+
 class ToolExecutionException(Exception):
     """Tool execution failed."""
 
@@ -76,6 +121,29 @@ class SearchToolUsage(str, Enum):
     DISABLED = "disabled"
     ENABLED = "enabled"
     AUTO = "auto"
+
+
+class CustomToolUserFileSnapshot(BaseModel):
+    file_ids: list[str]  # References to saved images or CSVs
+
+
+class CustomToolCallSummary(BaseModel):
+    type: Literal["custom_tool_result"] = "custom_tool_result"
+    tool_name: str
+    response_type: str  # e.g., 'json', 'image', 'csv', 'graph'
+    # JSON field names alone cannot distinguish output from file references.
+    tool_result: JsonValue | CustomToolUserFileSnapshot = Field(
+        union_mode="left_to_right"
+    )
+    error: CustomToolErrorInfo | None = None
+
+    @model_validator(mode="after")
+    def restore_file_references(self) -> Self:
+        if self.response_type in {"image", "csv"}:
+            self.tool_result = CustomToolUserFileSnapshot.model_validate(
+                self.tool_result
+            )
+        return self
 
 
 class ChatMinimalTextMessage(BaseModel):
@@ -142,6 +210,40 @@ class ToolContext(BaseModel):
     inject_memories_in_prompt: bool = True
 
 
+class ToolCallInfo(BaseModel):
+    message_id: str
+    parent_message_id: str | None = None
+    # The parent_tool_call_id is the actual generated tool call id
+    # It is NOT the DB ID which often does not exist yet when the ToolCallInfo is created
+    # None if attached to the Chat Message directly
+    parent_tool_call_id: str | None
+    turn_index: int
+    tab_index: int
+    tool_name: str
+    tool_call_id: str
+    tool_id: int
+    reasoning_tokens: str | None
+    tool_call_arguments: dict[str, Any]
+    tool_call_response: str
+    search_docs: list[SearchDoc] | None = None
+    generated_images: list[GeneratedImage] | None = None
+    generated_files: list[PythonExecutionFile] | None = None
+    # File-store ids of blobs custom tools saved during the call.
+    generated_file_ids: list[str] | None = None
+
+    @property
+    def execution_key(self) -> tuple[str, str]:
+        return self.message_id, self.tool_call_id
+
+    @property
+    def parent_execution_key(self) -> tuple[str, str] | None:
+        if self.parent_tool_call_id is None:
+            return None
+        if self.parent_message_id is None:
+            raise ValueError("Child tool has no parent message identity")
+        return self.parent_message_id, self.parent_tool_call_id
+
+
 CHAT_SESSION_ID_PLACEHOLDER = "CHAT_SESSION_ID"
 MESSAGE_ID_PLACEHOLDER = "MESSAGE_ID"
 USER_ID_PLACEHOLDER = "USER_ID"
@@ -185,5 +287,43 @@ class PythonArguments(BaseModel):
     code: str
 
 
+class PythonExecutionFile(BaseModel):
+    """File generated during Python execution"""
+
+    filename: str
+    file_link: str
+
+
+class PythonExecutionDelta(BaseModel):
+    """New process output from Python execution."""
+
+    stdout: str = ""
+    stderr: str = ""
+
+
+class LlmPythonExecutionResult(BaseModel):
+    """Result from Python code execution"""
+
+    type: Literal["python_execution"] = "python_execution"
+
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    timed_out: bool
+    generated_files: list[PythonExecutionFile]
+    error: str | None = None
+    # Set when some session files are absent
+    staging_notice: str | None = None
+
+
 class BashArguments(BaseModel):
     cmd: str
+
+
+class LlmBashExecutionResult(BaseModel):
+    type: Literal["bash_execution"] = "bash_execution"
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    timed_out: bool
+    error: str | None = None

@@ -14,10 +14,10 @@ from onyx.agents.models import (
     StepRecord,
     ToolExecutionRecord,
 )
+from onyx.chat.models import ChatSearchResult, ToolReplayData
 from onyx.chat.presentation import _collect_tool_history, replay_response
 from onyx.chat.renderer import ToolRenderer
 from onyx.chat.response import response_record
-from onyx.chat.response_models import ChatSearchResult, ToolReplayData
 from onyx.configs.constants import DocumentSource, MessageType
 from onyx.context.search.models import SavedSearchDoc, SearchDoc, SearchDocsResponse
 from onyx.db.chat import translate_db_search_doc_to_saved_search_doc
@@ -37,8 +37,8 @@ from onyx.server.query_and_chat.streaming_models import (
     ReasoningDelta,
     SearchToolDocumentsDelta,
 )
-from onyx.tools.models import ChatFile
-from onyx.tools.results import (
+from onyx.tools.models import (
+    ChatFile,
     CustomToolCallSummary,
     CustomToolUserFileSnapshot,
     ToolExecutionError,

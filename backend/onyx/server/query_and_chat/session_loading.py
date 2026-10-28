@@ -20,7 +20,9 @@ from onyx.db.chat import (
 )
 from onyx.db.chat_response import read_chat_execution, read_response_replay_data
 from onyx.db.models import ChatMessage
-from onyx.db.tools import get_tool_by_id
+from onyx.db.tools import (
+    get_tool_by_id,
+)
 from onyx.deep_research.tool_definitions import (
     RESEARCH_AGENT_IN_CODE_ID,
     RESEARCH_AGENT_TASK_KEY,
@@ -58,7 +60,7 @@ from onyx.server.query_and_chat.streaming_models import (
     SearchToolStart,
     SectionEnd,
 )
-from onyx.tools.results import CustomToolErrorInfo, GeneratedImage
+from onyx.tools.models import CustomToolErrorInfo, GeneratedImage
 from onyx.tools.tool_implementations.coding_agent.coding_agent_tool import (
     CodingAgentTool,
 )
@@ -584,11 +586,12 @@ def translate_assistant_message_to_packets(
                     )
                 )
 
+            # Process each tool call in this turn (single pass).
+            turn_tool_packets: list[Packet] = []
             for tool_call in tool_calls_in_turn:
                 # Here we do a try because some tools may get deleted before the session is reloaded.
                 try:
                     tool = get_tool_by_id(tool_call.tool_id, db_session)
-
                     # Handle different tool types
                     if tool.in_code_tool_id in [
                         SearchTool.__name__,
@@ -601,7 +604,7 @@ def translate_assistant_message_to_packets(
                             translate_db_search_doc_to_saved_search_doc(doc)
                             for doc in tool_call.search_docs
                         ]
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_search_packets(
                                 search_queries=queries,
                                 search_docs=search_docs,
@@ -621,7 +624,7 @@ def translate_assistant_message_to_packets(
                         urls = cast(
                             list[str], tool_call.tool_call_arguments.get("urls", [])
                         )
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_fetch_packets(
                                 fetch_docs,
                                 urls,
@@ -636,14 +639,14 @@ def translate_assistant_message_to_packets(
                                 GeneratedImage(**img)
                                 for img in tool_call.generated_images
                             ]
-                            packet_list.extend(
+                            turn_tool_packets.extend(
                                 create_image_generation_packets(
                                     images, turn_num, tab_index=tool_call.tab_index
                                 )
                             )
 
                     elif tool.in_code_tool_id == FileReaderTool.__name__:
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_file_reader_packets(
                                 summary_json=tool_call.tool_call_response or "",
                                 turn_index=turn_num,
@@ -658,7 +661,7 @@ def translate_assistant_message_to_packets(
                             tool_call.tool_call_arguments.get(RESEARCH_AGENT_TASK_KEY)
                             or "Could not fetch saved research task.",
                         )
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_research_agent_packets(
                                 research_task=research_task,
                                 report_content=tool_call.tool_call_response,
@@ -678,7 +681,7 @@ def translate_assistant_message_to_packets(
                             tool_call.tool_call_arguments.get(CODING_AGENT_REPO_KEY)
                             or "",
                         )
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_coding_agent_packets(
                                 query=coding_query,
                                 repo=coding_repo,
@@ -691,7 +694,7 @@ def translate_assistant_message_to_packets(
                     elif tool.in_code_tool_id == MemoryTool.__name__:
                         if tool_call.tool_call_response:
                             memory_data = json.loads(tool_call.tool_call_response)
-                            packet_list.extend(
+                            turn_tool_packets.extend(
                                 create_memory_packets(
                                     memory_text=memory_data["memory_text"],
                                     operation=cast(
@@ -729,7 +732,7 @@ def translate_assistant_message_to_packets(
                             except (json.JSONDecodeError, KeyError):
                                 # Fall back to raw response as stdout
                                 stdout = tool_call.tool_call_response
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_python_tool_packets(
                                 code=code,
                                 stdout=stdout,
@@ -780,7 +783,7 @@ def translate_assistant_message_to_packets(
                             for k, v in (tool_call.tool_call_arguments or {}).items()
                             if k != "requestBody"
                         }
-                        packet_list.extend(
+                        turn_tool_packets.extend(
                             create_custom_tool_packets(
                                 tool_name=tool.display_name or tool.name,
                                 response_type=custom_response_type,
@@ -797,6 +800,8 @@ def translate_assistant_message_to_packets(
                 except Exception as e:
                     logger.warning("Error processing tool call %s: %s", tool_call.id, e)
                     continue
+
+            packet_list.extend(turn_tool_packets)
 
     # Determine the next turn_index for the final message
     # It should come after all tool calls

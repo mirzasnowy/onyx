@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from onyx.image_gen.interfaces import ImageShape
-from onyx.tools.results import GeneratedImage
+from onyx.tools.models import GeneratedImage
 
 
 class ImageGenerationResponse(BaseModel):

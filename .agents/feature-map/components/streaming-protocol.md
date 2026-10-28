@@ -10,7 +10,7 @@
 **Edition:** CE
 **Owns:**
 `backend/onyx/server/query_and_chat/streaming_models.py`, `placement.py`,
-`backend/onyx/chat/emitter.py`, `stream_buffer.py`,
+`backend/onyx/chat/emitter.py`, `stream_buffer.py`, `renderer.py`, `presentation.py`,
 `web/src/app/app/services/streamingModels.ts`, `web/src/lib/search/streamingUtils.ts`,
 `mobile/src/chat/streamingModels.ts`, `mobile/src/chat/ndjson.ts`
 
@@ -59,9 +59,29 @@ resume read.
 
 ---
 
-If the delivery worker cannot start during completion, the caller finalizes replay.
-It marks normal replay incomplete and deletes content-free incognito buffers before resolving completion.
-The closed event dispatcher rejects later events.
+### Shared runtime presentation
+
+`chat/renderer.py` converts accepted model content and tool results into existing
+browser packets. `chat/presentation.py:ResponsePresenter` consumes shared runtime
+events. `replay_response` uses the same renderers for saved response records.
+The caller supplies saved search documents and tool IDs as detached tool records.
+Neither path runs a model or executes a tool.
+
+`chat/response.py` captures accepted steps before display processing. A display
+failure can therefore leave a complete response record available for saving.
+`chat/models.py` separates response content from per-message rendering
+settings, such as citation display and research phase.
+
+The detached response record is an in-memory aggregate. Database codecs restore
+concrete tool-result types before replay. It is not a standalone JSON storage schema.
+The response owner classifies execution failures and reports them separately.
+Session reload carries `error_info` alongside rendered packets. It uses the same
+`StreamingError` payload and failure projection as live errors; history omits stack traces.
+`OverallStop` ends rendering; it does not assert that execution succeeded.
+Only tool failures explicitly marked for public display produce error packets.
+Other tool errors remain available to the model for recovery.
+
+Chat, research, coding, and session reload use these shared rendering paths.
 
 ## 3. Data model
 
@@ -70,7 +90,7 @@ tables under [[chat-persistence]] store the *result* of a turn (`ChatMessage`,
 `ToolCall`, `SearchDoc`), not the packet stream that produced it.
 
 The stream ID is the reserved assistant message ID, or the user message ID in a multi-model turn
-(`process_message.py:build_chat_turn`, `processing_stream_id`). The only durable storage here is the **stream buffer**, a transient,
+(`prepare.py:prepare_chat_turn`, `processing_stream_id`). The only durable storage here is the **stream buffer**, a transient,
 cross-pod cache structure (`backend/onyx/chat/stream_buffer.py`), used so any
 api-server pod can replay and tail an in-flight run:
 
@@ -147,6 +167,10 @@ whether delivered through a progress update or directly at completion.
 - `tab_index`: disambiguates parallel tool calls that share a `turn_index`, so
   each gets its own tab in the UI
   (`backend/onyx/chat/renderer.py:MessageRenderer.tool_placement`).
+  Text or reasoning between tool calls starts a new section; only consecutive
+  top-level calls share tabs.
+- Coding-agent commands each have a distinct child section, so concurrent outputs
+  and exit statuses stay attached to their command.
 - `sub_turn_index`: nesting level for a tool that calls other tools; `None` at
   the top level.
 - `model_index`: which model produced the packet in a multi-model turn (`0`,
@@ -198,7 +222,7 @@ chat generator still runs through Starlette's thread pool for each yielded packe
 ### 4.5 Buffering and resume
 
 `ChatDelivery` sends packets to the live reader and stages serialized lines for
-`StreamBufferWriter`. The event worker drains a full 256-line batch immediately,
+`StreamBufferWriter`. The event worker flushes a batch when it reaches 32 KiB,
 including when one event produces many packets. It also flushes smaller batches
 every 50 ms. Cache I/O runs outside the publication lock, so control and
 persistence threads can keep publishing while a cache write blocks.
@@ -206,10 +230,12 @@ persistence threads can keep publishing while a cache write blocks.
 `StreamBufferWriter` compresses lines into cache chunks, flushing at 32 KiB or
 when the delivery worker requests a flush. `mark_done` finalizes replay retention
 or deletes content-free incognito buffers.
+If the event worker cannot start during completion, the caller performs the same
+cleanup and marks replay incomplete before releasing delivery ownership.
 
 Replay overflow, cache errors, and storage limits make the stream non-resumable;
 they do not fail live delivery. `STREAM_GAP` reports missing live output, such as
-reader overflow or failed agent-event delivery. Completion checks unfinished
+failed agent-event delivery. Completion checks unfinished
 events separately from cache cleanup, so a slow final cache write does not
 produce a false live-stream error.
 
@@ -271,7 +297,7 @@ emitting `ChatHeartbeat` packets on `CHAT_HEARTBEAT_INTERVAL_S` while waiting.
 9. **`PacketException.exception` never serializes.** It is `Field(exclude=True)`;
    the field exists for in-process error propagation, not for the wire. A
    client-visible error goes out as `StreamingError`
-   (`backend/onyx/chat/models.py:StreamingError`), a sibling of `Packet` in the
+   (`backend/onyx/server/query_and_chat/streaming_models.py:StreamingError`), a sibling of `Packet` in the
    `AnswerStreamPart` union, not as a `PacketObj`.
 10. **The stream buffer can develop a gap.** `read_stream_chunks` returning
     `gap=True` means the sequence is unrecoverable; `resume_chat_stream` ends
@@ -393,15 +419,4 @@ Live and saved answers retain citation metadata when the answer starts with a
 citation. Saved history hides the configured thinking tool, just as live output does.
 Coding-child reasoning uses `CodingAgentThinkingDelta`, including native thinking
 and configured thinking-tool output. Replay assigns sections in accepted content
-order. Answer sections close before intervening thinking or tool calls; later answer text starts a new section.
-Only consecutive top-level tool calls share tabs. Text or reasoning between calls starts a new section. Citation removal also applies to citation-only and interrupted answers.
-Generated-message metadata supplies saved source references, including previously
-retrieved sources that the current response did not retrieve again.
-
-
-### Saved response replay
-
-`db/chat_response.py:read_response_replay_data` loads detached documents and tool identities.
-`chat/presentation.py:replay_response` renders those values without database access.
-Live and saved output share the renderer. Accepted message IDs remain required;
-replay does not invent IDs for incomplete records.
+order. Citation removal also applies to citation-only and interrupted answers.

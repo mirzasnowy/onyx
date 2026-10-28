@@ -13,7 +13,7 @@ from onyx.agents.models import (
     ToolExecutionRecord,
 )
 from onyx.chat.chat_utils import capture_chat_history
-from onyx.chat.response_models import ResponseRecord
+from onyx.chat.models import ResponseRecord
 from onyx.configs.constants import MessageType
 from onyx.db.chat import (
     add_chats_to_session_from_slack_thread,

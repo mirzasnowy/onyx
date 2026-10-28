@@ -56,6 +56,7 @@ from typing_extensions import TypedDict  # noreorder
 
 from onyx.agents.models import ExecutionStatus, RunFailure, RunStatus
 from onyx.auth.schemas import UserRole
+from onyx.coding_agent.models import CodingAgentCallResult
 from onyx.configs.constants import (
     ANONYMOUS_USER_UUID,
     DEFAULT_BOOST,
@@ -132,7 +133,7 @@ from onyx.db.enums import (
 )
 from onyx.db.index_attempt_metrics_models import IndexAttemptStage
 from onyx.db.pydantic_type import PydanticListType, PydanticType
-from onyx.deep_research.models import ResearchConfiguration
+from onyx.deep_research.models import ResearchAgentCallResult, ResearchConfiguration
 from onyx.external_apps.url_glob import UrlGlob
 from onyx.file_store.models import FileDescriptor
 from onyx.kg.models import KGEntityTypeAttributes, KGStage
@@ -144,14 +145,12 @@ from onyx.llm.models import (
 from onyx.llm.override_models import LLMOverride, PromptOverride
 from onyx.natural_language_processing.vertex_auth import VertexEmbeddingConfigDict
 from onyx.server.security.models import IncognitoAvailability, SSRFProtectionLevel
-from onyx.tools.results import (
-    CodingAgentCallResult,
+from onyx.tools.models import (
     CustomToolCallSummary,
     FileReadResult,
     LlmBashExecutionResult,
     LlmPythonExecutionResult,
     MemoryUpdated,
-    ResearchAgentCallResult,
     ToolExecutionError,
 )
 from onyx.tools.tool_implementations.images.models import FinalImageGenerationResponse

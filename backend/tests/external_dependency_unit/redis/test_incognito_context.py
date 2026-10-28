@@ -42,15 +42,17 @@ from onyx.chat.incognito_context import (
     teardown_incognito_session,
 )
 from onyx.chat.models import (
+    ChatResponseSnapshot,
     IncognitoContext,
     IncognitoState,
     PromptMetadata,
+    ResponseRecord,
 )
 from onyx.chat.prompt_formatting import prompt_metadata
-from onyx.chat.response_models import ChatResponseSnapshot, ResponseRecord
 from onyx.chat.stream_buffer import _chunk_key
 from onyx.configs.constants import DocumentSource, MessageType
 from onyx.context.search.models import SearchDoc, SearchDocsResponse
+from onyx.deep_research.models import ResearchAgentCallResult
 from onyx.file_store.models import ChatFileType, ChatLoadedFile
 from onyx.llm.models import (
     AssistantMessage,
@@ -61,7 +63,6 @@ from onyx.llm.models import (
 )
 from onyx.llm.models import ToolCall as AgentToolCall
 from onyx.redis.redis_pool import get_raw_redis_client, get_redis_client
-from onyx.tools.results import ResearchAgentCallResult
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 
 

@@ -14,8 +14,12 @@ from onyx.file_store.utils import load_chat_file_by_id, load_user_file_content
 from onyx.llm.models import ToolDefinition, ToolResult
 from onyx.tools.constants import FILE_READER_MAX_CHARS
 from onyx.tools.interface import Tool, parse_tool_arguments
-from onyx.tools.models import FileReaderArguments, ToolCallException, ToolContext
-from onyx.tools.results import FileReadResult
+from onyx.tools.models import (
+    FileReaderArguments,
+    FileReadResult,
+    ToolCallException,
+    ToolContext,
+)
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()

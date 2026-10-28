@@ -15,8 +15,7 @@ from onyx.llm.cancellation import CancellationSignal
 from onyx.llm.models import ToolCall, ToolResult, ToolResultMessage
 from onyx.server.query_and_chat.placement import Placement
 from onyx.server.query_and_chat.streaming_models import CustomToolDelta
-from onyx.tools.models import ToolContext
-from onyx.tools.results import CustomToolCallSummary
+from onyx.tools.models import CustomToolCallSummary, ToolContext
 from onyx.tools.tool_implementations.mcp.mcp_tool import MCPTool
 
 

@@ -17,9 +17,8 @@ from onyx.chat.citation_processor import CitationMapping, DynamicCitationProcess
 from onyx.chat.citation_utils import (
     update_citation_processor_from_tool_result,
 )
-from onyx.chat.models import PromptMetadata
+from onyx.chat.models import CitationMode, PromptMetadata
 from onyx.chat.prompt_utils import prepare_prompt, with_language_section
-from onyx.chat.response_models import CitationMode
 from onyx.configs.chat_configs import DR_REPORT_LLM_TIMEOUT_S
 from onyx.context.search.models import SearchDocsResponse
 from onyx.deep_research.models import (

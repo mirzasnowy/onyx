@@ -18,8 +18,14 @@ from onyx.llm.models import (
     ToolResult,
     ToolResultMessage,
 )
-from onyx.tools.models import ToolCallException, ToolContext, ToolExecutionException
-from onyx.tools.results import MemoryOperation, MemoryUpdated, ToolExecutionError
+from onyx.tools.models import (
+    MemoryOperation,
+    MemoryUpdated,
+    ToolCallException,
+    ToolContext,
+    ToolExecutionError,
+    ToolExecutionException,
+)
 from onyx.tools.tool_implementations.memory.memory_tool import MemoryTool
 from onyx.tracing.flows import LLMFlow
 from onyx.utils.fleet_query_telemetry import CURRENT_QUERY_OBSERVATION, QueryObservation

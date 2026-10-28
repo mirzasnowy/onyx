@@ -18,8 +18,7 @@ from onyx.file_store.models import ChatFileType, InMemoryChatFile
 from onyx.llm.cancellation import CancellationSignal
 from onyx.llm.models import ToolResult
 from onyx.tools.constants import FILE_READER_MAX_CHARS
-from onyx.tools.models import ToolCallException, ToolContext
-from onyx.tools.results import FileReadResult
+from onyx.tools.models import FileReadResult, ToolCallException, ToolContext
 from onyx.tools.tool_implementations.file_reader.file_reader_tool import (
     FILE_ID_FIELD,
     NUM_CHARS_FIELD,

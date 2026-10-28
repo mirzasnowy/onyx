@@ -12,7 +12,7 @@ from onyx.db.models import ChatSession
 from onyx.file_store.models import FileDescriptor
 from onyx.llm.models import GenerationRequestParams
 from onyx.llm.override_models import LLMOverride
-from onyx.server.query_and_chat.streaming_models import Packet
+from onyx.server.query_and_chat.streaming_models import Packet, StreamingError
 
 AUTO_PLACE_AFTER_LATEST_MESSAGE = -1
 
@@ -237,6 +237,7 @@ class ChatMessageDetail(BaseModel):
     time_sent: datetime
     files: list[FileDescriptor]
     error: str | None = None
+    error_info: StreamingError | None = None
     current_feedback: str | None = None  # "like" | "dislike" | null
     processing_duration_seconds: float | None = None
     preferred_response_id: int | None = None
@@ -286,8 +287,7 @@ class ChatSessionDetailResponse(BaseModel):
     deleted: bool = False
     owner_name: str | None = None
     packets: list[list[Packet]]
-    # Set while a stream is in flight and resumable: cursor-0 replay+tail is
-    # available at /chat-session/{id}/resume-stream.
+    # The buffer also retains interrupted work until its cache TTL expires.
     current_stream: CurrentStreamInfo | None = None
     # Readiness is independent of whether a stream can be replayed.
     is_processing: bool = False

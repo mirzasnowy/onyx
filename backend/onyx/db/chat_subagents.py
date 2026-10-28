@@ -9,8 +9,8 @@ from sqlalchemy.sql.selectable import CTE
 
 from onyx.agents.execution_records import run_input_message_id
 from onyx.agents.models import AgentInfo, RunStatus, messages_from_steps
-from onyx.chat.models import MAX_DISCOVERED_AGENTS
-from onyx.chat.response_models import (
+from onyx.chat.models import (
+    MAX_DISCOVERED_AGENTS,
     ChatBranch,
     MessageRendering,
     ResponseLink,

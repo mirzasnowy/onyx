@@ -9,7 +9,7 @@ from onyx.coding_agent.agent import (
     CodingAgent,
     coding_sandbox_session,
 )
-from onyx.coding_agent.models import CodingAgentArguments
+from onyx.coding_agent.models import CodingAgentArguments, CodingAgentCallResult
 from onyx.coding_agent.tool_definitions import (
     CODING_AGENT_QUERY_KEY,
     CODING_AGENT_REPO_KEY,
@@ -22,7 +22,6 @@ from onyx.llm.models import ToolDefinition, ToolResult, UserMessage
 from onyx.prompts.coding_agent.coding_agent import MAX_CODING_AGENT_CYCLES
 from onyx.tools.interface import Tool, parse_tool_arguments
 from onyx.tools.models import ToolContext
-from onyx.tools.results import CodingAgentCallResult
 from onyx.tools.tool_implementations.bash.bash_tool import BashTool
 from onyx.utils.logger import setup_logger
 

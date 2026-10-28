@@ -8,22 +8,28 @@ import pytest
 from pydantic import JsonValue, ValidationError
 from pytest import MonkeyPatch
 
+from onyx.agents.models import RunFailure, RunFailureKind
+from onyx.chat.errors import chat_error
 from onyx.configs.constants import MessageType
 from onyx.db import chat_response
 from onyx.db.chat import translate_db_message_to_chat_message_detail
-from onyx.db.chat_display import extract_referenced_file_descriptors
+from onyx.db.chat_response import _extract_referenced_file_descriptors
 from onyx.db.models import ChatMessage
 from onyx.file_store.models import ChatFileType
-from onyx.llm.models import GenerationRequestParams, ReasoningEffort
-from onyx.tools.records import RecordedToolCallInfo
-from onyx.tools.results import PythonExecutionFile
+from onyx.llm.models import (
+    GenerationRequestParams,
+    LLMErrorInfo,
+    ReasoningEffort,
+    ToolChoiceOptions,
+)
+from onyx.tools.models import PythonExecutionFile, ToolCallInfo
 
 
 def _make_tool_call_info(
     generated_files: list[PythonExecutionFile] | None = None,
     tool_name: str = "run_python",
-) -> RecordedToolCallInfo:
-    return RecordedToolCallInfo(
+) -> ToolCallInfo:
+    return ToolCallInfo(
         message_id="test-run:0",
         parent_tool_call_id=None,
         turn_index=0,
@@ -38,12 +44,12 @@ def _make_tool_call_info(
     )
 
 
-# ---- extract_referenced_file_descriptors tests ----
+# ---- _extract_referenced_file_descriptors tests ----
 
 
 def test_returns_empty_when_no_generated_files() -> None:
     tool_call = _make_tool_call_info(generated_files=None)
-    result = extract_referenced_file_descriptors([tool_call], "some message")
+    result = _extract_referenced_file_descriptors([tool_call], "some message")
     assert result == []
 
 
@@ -55,7 +61,7 @@ def test_returns_empty_when_file_not_referenced() -> None:
         )
     ]
     tool_call = _make_tool_call_info(generated_files=files)
-    result = extract_referenced_file_descriptors([tool_call], "Here is your answer.")
+    result = _extract_referenced_file_descriptors([tool_call], "Here is your answer.")
     assert result == []
 
 
@@ -72,7 +78,7 @@ def test_extracts_referenced_file() -> None:
         f"Here is the chart: [chart.png](http://localhost/api/chat/file/{file_id})"
     )
 
-    result = extract_referenced_file_descriptors([tool_call], message)
+    result = _extract_referenced_file_descriptors([tool_call], message)
 
     assert len(result) == 1
     assert result[0]["id"] == file_id
@@ -95,7 +101,7 @@ def test_generated_spreadsheet_is_tabular_without_system_mime_types(
     tool_call = _make_tool_call_info(generated_files=files)
     message = f"[report.xlsx](http://localhost/api/chat/file/{file_id})"
 
-    result = extract_referenced_file_descriptors([tool_call], message)
+    result = _extract_referenced_file_descriptors([tool_call], message)
 
     assert len(result) == 1
     assert result[0]["type"] == ChatFileType.TABULAR
@@ -117,7 +123,7 @@ def test_filters_unreferenced_files() -> None:
     tool_call = _make_tool_call_info(generated_files=files)
     message = f"Here is the chart: [chart.png](http://localhost/api/chat/file/{referenced_id})"
 
-    result = extract_referenced_file_descriptors([tool_call], message)
+    result = _extract_referenced_file_descriptors([tool_call], message)
 
     assert len(result) == 1
     assert result[0]["id"] == referenced_id
@@ -145,7 +151,7 @@ def test_extracts_from_multiple_tool_calls() -> None:
     )
     message = f"[plot.png](http://localhost/api/chat/file/{id_1}) and [report.csv](http://localhost/api/chat/file/{id_2})"
 
-    result = extract_referenced_file_descriptors([tc1, tc2], message)
+    result = _extract_referenced_file_descriptors([tc1, tc2], message)
 
     assert len(result) == 2
     ids = {d["id"] for d in result}
@@ -163,7 +169,7 @@ def test_csv_file_type() -> None:
     tool_call = _make_tool_call_info(generated_files=files)
     message = f"[data.csv](http://localhost/api/chat/file/{file_id})"
 
-    result = extract_referenced_file_descriptors([tool_call], message)
+    result = _extract_referenced_file_descriptors([tool_call], message)
 
     assert len(result) == 1
     assert result[0]["type"] == ChatFileType.TABULAR
@@ -180,7 +186,7 @@ def test_unknown_extension_defaults_to_plain_text() -> None:
     tool_call = _make_tool_call_info(generated_files=files)
     message = f"[output.xyz](http://localhost/api/chat/file/{file_id})"
 
-    result = extract_referenced_file_descriptors([tool_call], message)
+    result = _extract_referenced_file_descriptors([tool_call], message)
 
     assert len(result) == 1
     assert result[0]["type"] == ChatFileType.PLAIN_TEXT
@@ -200,7 +206,7 @@ def test_skips_tool_calls_without_generated_files() -> None:
     )
     message = f"[result.png](http://localhost/api/chat/file/{file_id})"
 
-    result = extract_referenced_file_descriptors(
+    result = _extract_referenced_file_descriptors(
         [tc_no_files, tc_empty, tc_with_files], message
     )
 
@@ -289,3 +295,60 @@ def test_chat_detail_validates_stored_request_parameters() -> None:
     message.request_params = invalid_params
     with pytest.raises(ValidationError):
         translate_db_message_to_chat_message_detail(message)
+
+
+@pytest.mark.parametrize("structured", [True, False])
+def test_history_returns_failure_separately_from_partial_answer(
+    structured: bool,
+) -> None:
+    failure = RunFailure(
+        kind=RunFailureKind.LLM,
+        message="Provider declined the request",
+        llm_error=LLMErrorInfo(
+            message="Provider declined the request",
+            error_code="MODEL_REFUSAL",
+            is_retryable=False,
+            tool_choice=ToolChoiceOptions.AUTO,
+            finish_reason="content_filter",
+        ),
+    )
+    message = ChatMessage(
+        id=1,
+        chat_session_id=uuid4(),
+        message="Partial answer",
+        token_count=2,
+        message_type=MessageType.ASSISTANT,
+        time_sent=datetime.now(timezone.utc),
+        search_docs=[],
+        chat_message_feedbacks=[],
+        error=failure.message,
+        response_failure=RunFailure.model_validate_json(failure.model_dump_json())
+        if structured
+        else None,
+        model_display_name="Test model",
+        request_params={
+            "model_name": "test",
+            "model_provider": "openai",
+            "reasoning_effort": "low",
+            "max_tokens": None,
+            "sent_kwargs": {},
+        },
+    )
+    detail = translate_db_message_to_chat_message_detail(message)
+    assert detail.message == "Partial answer"
+    assert detail.error == failure.message
+    assert detail.error_info is not None
+    assert detail.error_info.stack_trace is None
+    assert detail.error_info.details is not None
+    assert detail.error_info.details["model"] == "test"
+    assert detail.error_info.details["provider"] == "openai"
+    if structured:
+        live = chat_error(failure)
+        assert detail.error_info.error_code == live.error_code == "MODEL_REFUSAL"
+        assert detail.error_info.is_retryable == live.is_retryable is False
+        assert detail.error_info.details["finish_reason"] == "content_filter"
+    else:
+        assert detail.error_info.error_code is None
+    message.error = None
+    message.response_failure = None
+    assert translate_db_message_to_chat_message_detail(message).error_info is None

@@ -30,8 +30,12 @@ from onyx.image_gen.interfaces import (
 from onyx.llm.cancellation import AgentCancelled
 from onyx.llm.models import ToolDefinition, ToolResult
 from onyx.tools.interface import Tool, parse_tool_arguments
-from onyx.tools.models import ToolCallException, ToolContext, ToolExecutionException
-from onyx.tools.results import GeneratedImage
+from onyx.tools.models import (
+    GeneratedImage,
+    ToolCallException,
+    ToolContext,
+    ToolExecutionException,
+)
 from onyx.tools.tool_implementations.images.models import (
     FinalImageGenerationResponse,
     ImageGenerationArguments,

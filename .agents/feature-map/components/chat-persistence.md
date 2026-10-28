@@ -137,8 +137,8 @@ Checkpoint bindings identify the tenant and response. Saved progress uses the ru
 `pending_tool_calls` and `human_tool_answers`.
 Feature state is a JSON object validated by its owning feature during restoration.
 Chat's `kind` discriminator selects the feature schema; message metadata and tool details retain their tagged codec.
-Prompt images store file references. Restoration loads their bytes only when requested.
-Checkpoint publication rejects content-free incognito sessions and mismatched response bindings before writing content.
+Prompt image metadata saves file IDs and token counts; restoration loads image bytes only when needed.
+The checkpoint writer rejects content-free sessions and mismatched response bindings before writing checkpoint state.
 
 ### `ChatSession` (`db/models.py:ChatSession`, table `chat_session`)
 
@@ -372,6 +372,30 @@ Configured utility clients receive one provider cost check in the factory.
 Naming keeps its existing rate-limit check and text fallback on failure. Sessions whose
 incognito mode does not persist content skip the naming call.
 
+### Canonical response storage APIs
+
+`db/chat_response.py` adds storage APIs for accepted runtime records. Each response
+item stores one model generation, including thinking blocks and provider metadata.
+`ToolCall.result` stores the actual tool result and typed application details.
+Readers rebuild model history from these records in step and tool-call order.
+`db/chat_response.py` writes the displayed answer, token counts, source links,
+citations, and referenced files alongside the accepted runtime records.
+
+`db/chat_subagents.py` loads child history from the selected conversation branch.
+A child session belongs to the root conversation that created it. Public chat
+lists, search, message reads, and admin history exclude child sessions. Deleting
+a root removes its descendants and files. Retention considers descendant activity.
+Child discovery rejects unrelated branches and bounds traversal and payload size.
+Usage exports include child prompts and retain the root user, persona, and flow
+attribution. Excluding children from content-history views does not exclude their usage.
+
+The canonical writer enforces the session's recording policy. Content-free sessions
+retain status and usage without response items, tool results, or child content.
+Projected saves update the displayed answer and accepted records in one transaction.
+`read_response_replay_data` loads detached tool IDs and saved source documents.
+It checks references against accepted calls and keeps saved document IDs for source cards.
+Legacy response text remains readable for conversations created before SDK adoption.
+
 ## 5. Contracts and invariants
 
 1. **Public message trees contain user input and assistant responses.**
@@ -529,9 +553,10 @@ uv run --env-file .vscode/.env pytest backend/tests/external_dependency_unit/db/
 - **The empty root message means message counts are off by one** from what a
   naive count of "turns" suggests. Do not assume `len(messages)` is `2 *
   num_turns`.
-- **Tool content and application details have different consumers.** SDK history
-  replays the saved result content to the model. Rendering reads its typed details.
-  Legacy history may use placeholders because it lacks saved model-facing results.
+- **Tool content and application details have different consumers.** Storage retains model-facing results and typed rendering details. Ordinary chat
+  replaces prior-turn tool content with placeholders when assembling the prompt,
+  except image-generation results. Stored content remains available for citations
+  and rendering. Other SDK callers choose their own prompt policy.
 - **A `ToolCall` with `parent_tool_call_id` set is a sub-agent's internal
   call, not a retry.** `turn_number` distinguishes retries/sequences;
   `parent_tool_call_id` distinguishes nesting depth. Conflating the two will
@@ -567,16 +592,23 @@ links and source cards when loading saved responses. Restoration rejects missing
 Restored root questions retain `chat:<question-id>` IDs. Child instructions retain
 their run-input IDs. Saved compaction boundaries use these same IDs after reload.
 
+### Detached replay and usage attribution
 
-Replay includes sources linked only to a tool. Root-selected document versions
-take precedence for answer citations; tool cards retain their own saved versions.
-### Session readiness API
+`db/chat_response.py:read_response_replay_data` validates saved tool references against accepted message and call IDs.
+It loads source documents before `chat/presentation.py:replay_response` renders packets without ORM objects.
+Tool-linked sources fill missing documents; a root-selected version takes precedence when IDs match.
+Display projection rejects missing accepted message IDs instead of inventing replacement IDs.
 
-`GET /chat/chat-session/{id}/status` checks session access and returns `is_processing`.
-Session ownership remains active through execution, storage, and cleanup.
-Session details also include `is_processing`, separately from the resumable stream ID.
-Cache failures do not report readiness: status fails, while saved history remains readable with input blocked.
-Clients must deploy after the status endpoint is available.
+Displayed thinking preserves the recorded order of model thinking, text treated as thinking, and configured thinking-tool content.
+This order also applies when session details reload the response.
 
-Usage exports include child execution tokens with the root user and channel attribution.
-Conversation listings and query-count analytics exclude child sessions.
+Child sessions inherit the root's user, agent, Slack attribution, and recording mode.
+Usage exports include these attributed child runs because they consume tokens.
+Admin conversation history and query analytics still exclude child sessions from their conversation lists.
+
+
+`ChatMessageDetail.error_info` projects stored `response_failure` into the same public
+error payload used by streaming. It includes the message, error code, retryability,
+and safe model diagnostics. History responses omit stack traces. Legacy rows use
+`chat_message.error` when structured failure data is absent. The existing content
+recording policy still controls persistence; this projection adds no stored fields.

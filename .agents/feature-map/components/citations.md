@@ -167,12 +167,16 @@ behavior, not a style preference (`backend/onyx/chat/README.md`).
 ### 4.5 Parsing the stream: `DynamicCitationProcessor`
 
 `backend/onyx/chat/agent.py:ChatAgent` creates a `DynamicCitationProcessor` for prompt sources (mode
-`HYPERLINK` unless `include_citations=False`), seeds it with any project-file
-citation mapping (`build_context_file_citation_mapping`), and updates it after every
+`HYPERLINK` unless `include_citations=False`). It restores historical sources before
+allocating project-file citations (`build_context_file_citation_mapping`). Files reuse
+their existing number by file ID; new files receive unused numbers. Prompt documents,
+tool context, and rendering use the same mapping. The processor updates after every
 tool response via `citation_utils.py:update_citation_processor_from_tool_result`,
 which turns a `SearchDocsResponse.citation_mapping` (`dict[int, str]`, number to
 document id) into a `dict[int, SearchDoc]` by matching against
 `search_docs_response.search_docs`.
+Research results carry the number-to-document mapping directly. Ordinary chat restores it
+when replaying a research turn, preserving its links and reserving its citation numbers for later searches.
 
 `backend/onyx/chat/renderer.py:MessageRenderer._content` feeds answer text to
 `citation_processor.process_token`. The processor holds
@@ -193,9 +197,7 @@ in its `citations` list.
 
 `backend/onyx/chat/agent.py:ChatAgent` maintains the known source mapping for prompts.
 The renderer records only citations that appear in displayed text.
-The shared citation helper also accepts research results with direct number-to-document mappings.
-This preserves their source links and reserves their citation numbers when restoring history.
-Intermediate reports list only mapped sources cited in the report, even when citation markers remain unformatted.
+Intermediate reports list only the mapped sources cited in the report, including when citation markers remain unformatted.
 `backend/onyx/chat/presentation.py:project_response` rebuilds the saved display from
 recorded messages with the same renderer. It carries source documents and emitted
 citation information into persistence.

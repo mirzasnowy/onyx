@@ -267,10 +267,10 @@ The component is unmapped. Do two things:
 
 Never treat "not in the map" as "low risk".
 
-| `backend/onyx/chat/response_models.py`, `backend/onyx/db/chat_display.py` | chat-persistence |
+| `backend/onyx/chat/models.py`, `backend/onyx/db/chat_response.py` | chat-persistence |
 
-| `backend/onyx/db/chat_response.py`, `backend/onyx/db/chat_subagents.py`, `backend/onyx/db/chat_display.py` | chat-persistence |
+| `backend/onyx/db/chat_response.py`, `backend/onyx/db/chat_subagents.py` | chat-persistence |
 
-| `backend/onyx/tools/results.py`, `backend/onyx/tools/records.py` | tools-framework |
+| `backend/onyx/tools/models.py` | tools-framework |
 
 | `backend/onyx/agents/` | agent-runtime |

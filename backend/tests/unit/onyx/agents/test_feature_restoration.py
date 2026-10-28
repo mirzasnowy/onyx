@@ -34,8 +34,7 @@ from onyx.agents.tools import (
 )
 from onyx.chat.agent import ChatAgent
 from onyx.chat.checkpoint import CHECKPOINT_PAYLOAD_TYPES
-from onyx.chat.models import ChatFeatureState
-from onyx.chat.response_models import ChatSearchResult, CheckpointBinding
+from onyx.chat.models import ChatFeatureState, ChatSearchResult, CheckpointBinding
 from onyx.chat.restoration import persist_checkpoint_files
 from onyx.coding_agent.agent import CodingAgent
 from onyx.coding_agent.tool_definitions import BASH_TOOL_NAME

@@ -37,11 +37,11 @@ from onyx.chat.models import (
     AnswerStreamPart,
     ChatFullResponse,
     ChatResponseOutcome,
+    ChatResponseSnapshot,
     ChatTurnSetup,
     CreateChatSessionID,
     PersistenceStatus,
     ReservedChatResponse,
-    StreamingError,
 )
 from onyx.chat.persistence import ChatResponsePersistence
 from onyx.chat.prepare import create_chat_agent
@@ -49,7 +49,6 @@ from onyx.chat.process_message import (
     _stream_chat_turn,
     gather_stream_full,
 )
-from onyx.chat.response_models import ChatResponseSnapshot
 from onyx.chat.run_store import ChatRunStore
 from onyx.chat.stream_buffer import ChatStream, StreamBufferWriter
 from onyx.configs.constants import MessageType
@@ -88,6 +87,7 @@ from onyx.server.query_and_chat.streaming_models import (
     OverallStop,
     Packet,
     ReasoningStart,
+    StreamingError,
 )
 from onyx.server.utils import get_json_line
 from onyx.tracing.flows import LLMFlow
@@ -3197,7 +3197,11 @@ def test_invalid_chat_settings_return_actionable_errors(
             create_chat_agent(setup, MagicMock(), 0, CancellationSignal(), True)
     assert raised.value.error_code == OnyxErrorCode.BAD_REQUEST
     packet = chat_error(raised.value, setup.responses[0].llm, model_index=1)
-    assert packet.details == {"model_index": 1}
+    assert packet.details == {
+        "model_index": 1,
+        "model": "test-model",
+        "provider": "openai",
+    }
     assert packet.error == detail
     assert not packet.is_retryable
 

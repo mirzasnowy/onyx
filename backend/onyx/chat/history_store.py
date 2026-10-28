@@ -19,13 +19,13 @@ from onyx.chat.incognito_context import (
     lookup_incognito_agent,
     save_incognito_response,
 )
-from onyx.chat.response import restore_search_documents
-from onyx.chat.response_models import (
+from onyx.chat.models import (
     ChatBranch,
     ChatResponseSnapshot,
     ResponseRecord,
     SavedAgentContext,
 )
+from onyx.chat.response import restore_search_documents
 from onyx.db.chat_response import save_chat_response_to_db
 from onyx.db.chat_subagents import (
     load_agent_history,

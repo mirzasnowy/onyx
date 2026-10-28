@@ -9,9 +9,8 @@ from onyx.agents.models import (
 )
 from onyx.agents.runtime import Agent
 from onyx.agents.tools import AgentTool, ToolExecutionMode, ToolInvocation
-from onyx.chat.models import PromptMetadata
+from onyx.chat.models import MessageRendering, PresentationMode, PromptMetadata
 from onyx.chat.prompt_utils import prepare_prompt
-from onyx.chat.response_models import MessageRendering, PresentationMode
 from onyx.coding_agent.tool_definitions import (
     BASH_TOOL_DESCRIPTION,
     CODING_AGENT_THINK_TOOL_DESCRIPTION,

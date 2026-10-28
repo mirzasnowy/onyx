@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from onyx.agents.models import AgentInfo, RunState, StepRecord, ToolExecutionRecord
-from onyx.chat.response_models import ResponseRecord
+from onyx.chat.models import ResponseRecord
 from onyx.context.search.models import SearchDoc, SearchDocsResponse
 from onyx.deep_research.models import ResearchConfiguration
 from onyx.llm.models import (

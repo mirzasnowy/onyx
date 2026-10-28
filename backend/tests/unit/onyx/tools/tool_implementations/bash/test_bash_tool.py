@@ -23,8 +23,7 @@ from onyx.server.query_and_chat.streaming_models import (
     SectionEnd,
     ToolCallDebug,
 )
-from onyx.tools.models import ToolCallException, ToolContext
-from onyx.tools.results import LlmBashExecutionResult
+from onyx.tools.models import LlmBashExecutionResult, ToolCallException, ToolContext
 from onyx.tools.tool_implementations.bash.bash_tool import (
     CMD_FIELD,
     BashTool,

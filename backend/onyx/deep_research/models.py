@@ -16,6 +16,12 @@ class ResearchConfiguration(BaseModel):
     reasoning_effort: ReasoningEffort
 
 
+class ResearchAgentCallResult(BaseModel):
+    type: Literal["research_result"] = "research_result"
+    intermediate_report: str
+    citation_mapping: dict[int, SearchDoc]
+
+
 class ResearchPhase(str, Enum):
     CLARIFICATION = "clarification"
     PLANNING = "planning"

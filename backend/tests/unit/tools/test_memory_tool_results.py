@@ -17,8 +17,7 @@ from onyx.server.query_and_chat.streaming_models import (
     SectionEnd,
     ToolCallDebug,
 )
-from onyx.tools.models import ToolContext
-from onyx.tools.results import MemoryUpdated
+from onyx.tools.models import MemoryUpdated, ToolContext
 from onyx.tools.tool_implementations.memory.memory_tool import MemoryTool
 
 

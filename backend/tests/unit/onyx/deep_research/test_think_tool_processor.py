@@ -4,8 +4,8 @@ import json
 
 import pytest
 
+from onyx.chat.models import MessageRendering
 from onyx.chat.renderer import MessageRenderer, ResponseLayout
-from onyx.chat.response_models import MessageRendering
 from onyx.deep_research.tool_definitions import THINK_TOOL_NAME
 from onyx.llm.model_response import (
     ChatCompletionDeltaToolCall,

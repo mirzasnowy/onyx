@@ -417,7 +417,7 @@ access-control consequence of this.
 `SavedChatFile` keeps a stored file ID without reading its bytes.
 Inline snapshots encode binary content as base64 for JSON round trips.
 `SavedContextFiles` preserves context metadata and restores image bytes lazily from the file store.
-`ChatSearchResult` in `chat/response_models.py` uses these snapshots for staged files.
+`ChatSearchResult` in `chat/models.py` uses these snapshots for staged files.
 Existing tools can still construct eager files without an ID.
 
 These values do not authorize file access or persist new blobs.

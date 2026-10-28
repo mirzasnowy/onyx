@@ -6,8 +6,8 @@ from uuid import uuid4
 import pytest
 
 from onyx.agents.models import ExecutionStatus, RunState, RunStatus, StepRecord
+from onyx.chat.models import MessageRendering, PresentationMode
 from onyx.chat.presentation import project_response
-from onyx.chat.response_models import MessageRendering, PresentationMode
 from onyx.configs.constants import MessageType
 from onyx.db.chat import (
     get_chat_message_reasoning,

@@ -27,9 +27,10 @@ from onyx.chat.models import (
     IncognitoContext,
     IncognitoMessage,
     IncognitoState,
+    ResponseRecord,
+    SavedAgentContext,
     serialize_incognito_message,
 )
-from onyx.chat.response_models import ResponseRecord, SavedAgentContext
 from onyx.chat.stream_buffer import stream_buffer_key_pattern
 from onyx.configs import app_configs
 from onyx.configs.chat_configs import (

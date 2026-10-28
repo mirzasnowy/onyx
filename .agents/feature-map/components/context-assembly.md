@@ -264,6 +264,9 @@ documents, metadata) precede the long `contents` field, because the model
 attends better to fields placed early relative to a long trailing block even
 though it technically has global access to the whole message.
 
+Context-file document numbers come from the same source mapping used by citation rendering.
+Existing file IDs retain their numbers; new files cannot reuse historical source numbers.
+
 Search-tool documents follow the same `document`-keyed shape in a `ToolResultMessage`.
 Each tool result can contain multiple documents. Project/context files are injected
 as a `UserMessage` containing one document list.
@@ -405,7 +408,6 @@ conversation in an out-of-Postgres store for the session's lifetime
 (`incognito_context.py:load_incognito_context`,
 `incognito_context.py:save_incognito_response`).
 
-`models.py` defines the incognito history models and their message serialization.
 `incognito_context.py` stores canonical root messages and child response records in one JSON envelope.
 Root messages decode once, including prompt metadata. Their serializer retains search and research citation sources, but omits other tool details and attachment bytes.
 The envelope has a sliding one-hour TTL, a one-megabyte limit, and at most 200 root messages.
@@ -634,6 +636,3 @@ cd backend && uv run pytest tests/integration -k chat
   actual tool set for the turn is known. It will overshoot the real prompt size
   on any turn that does not use every tool; this is intentional slack, not a
   bug to tighten.
-
-Historical search sources are restored, but query expansion resets for each new turn.
-Invalid forced-tool selections and unsupported deep-research requests return `BAD_REQUEST`.

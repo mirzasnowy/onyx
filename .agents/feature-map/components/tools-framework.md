@@ -85,6 +85,13 @@ and `BashTool`, checked in `python_tool.py:is_available` and `bash_tool.py:is_av
 
 ---
 
+### Shared result contracts
+
+`backend/onyx/tools/models.py` defines serializable result payloads independently
+of tool execution. Execution, storage, and presentation import the same types.
+Its `ToolCallInfo` records the originating model-message identity for display and storage.
+Application tools bind to SDK tools and return `ToolResult`.
+
 ## 3. Data model
 
 - `Tool` (`backend/onyx/db/models.py:Tool`): one row per tool a persona can attach.

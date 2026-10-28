@@ -10,8 +10,7 @@ from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 from onyx.agents.models import ExecutionCheckpoint, RunState
 from onyx.agents.runtime import Agent
 from onyx.chat.agent import ChatAgent
-from onyx.chat.models import ChatFeatureState
-from onyx.chat.response_models import ChatSearchResult
+from onyx.chat.models import ChatFeatureState, ChatSearchResult
 from onyx.configs.constants import FileOrigin
 from onyx.deep_research.agent import DeepResearchAgent
 from onyx.deep_research.models import DeepResearchFeatureState, ResearchFeatureState

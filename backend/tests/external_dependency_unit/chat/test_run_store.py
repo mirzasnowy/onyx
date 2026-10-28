@@ -36,9 +36,8 @@ from onyx.cache.factory import get_cache_backend
 from onyx.chat.agent import ChatAgent
 from onyx.chat.checkpoint import CHECKPOINT_PAYLOAD_TYPES
 from onyx.chat.history_store import get_chat_history_store
-from onyx.chat.models import ChatFeatureState
+from onyx.chat.models import ChatFeatureState, CheckpointBinding
 from onyx.chat.presentation import project_response
-from onyx.chat.response_models import CheckpointBinding
 from onyx.chat.restoration import persist_checkpoint_files
 from onyx.chat.run_store import ChatRunStore
 from onyx.configs.constants import FileOrigin, MessageType
@@ -63,8 +62,7 @@ from onyx.llm.models import (
     ToolResult,
     UserMessage,
 )
-from onyx.tools.models import ChatFile
-from onyx.tools.results import FileReadResult
+from onyx.tools.models import ChatFile, FileReadResult
 from onyx.tracing.flows import LLMFlow
 from onyx.utils.threadpool_concurrency import start_thread_future
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA_STANDARD_VALUE

@@ -10,7 +10,7 @@ import pytest
 from onyx.agents.runtime import Run
 from onyx.cache.interface import CacheBackend
 from onyx.chat import run_store
-from onyx.chat.response_models import ResponseOwner
+from onyx.chat.models import ResponseOwner
 from onyx.chat.run_store import ChatRunStore, _OwnedRun, _OwnerLease
 
 
